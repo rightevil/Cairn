@@ -48,6 +48,42 @@ function developmentFeatures() {
       return (this.project?.intents || []).filter(intent => intent.work).slice().reverse();
     },
 
+    developmentText(text) {
+      const fixed = {
+        'Plan the current milestone within the project design': '按项目设计规划当前里程碑',
+        'Replan affected work using current user directives': '根据当前用户指令重新规划受影响的工作',
+        'Evaluate the pending suggestion against the updated project direction': '按更新后的项目方向独立评估待处理建议',
+        'Plan the next milestone within the approved project design': '在已确认的项目设计内规划下一里程碑',
+        'Choose the next useful milestone within the approved design': '在已确认设计内选择下一项有价值的里程碑',
+        'Independently review the proposed plan and project fit': '独立审查计划及其与项目目标的一致性',
+        'Verify the milestone against raw integration evidence': '根据原始集成证据验收里程碑',
+        'Independently inspect the diff, acceptance and check evidence': '独立检查代码变更、验收条件和测试证据',
+        'Review progress and remaining work against the agreed project design': '按已确认的项目设计审查进展与剩余工作',
+        'Decide a new approach using repeated failure evidence': '根据重复失败的证据决定新的实施方法',
+        'Resolve failed integration checks without undoing completed external actions': '裁决集成检查失败，保留已完成的外部操作',
+        'Cancel running work and stop new dispatch': '取消当前执行并停止派发新任务',
+        'New user directive requires further work': '收到新用户指令，项目需要继续推进',
+        'Included in an independently approved plan': '已纳入通过独立审查的计划',
+        'Controls changed before result application': '应用结果前指令已变更，旧结果不再生效',
+        suggestion: '建议', directive: '用户指令',
+      };
+      if (fixed[text]) return fixed[text];
+      const prefixes = {
+        'Independently evaluate suggestion ': '独立评估建议 ',
+        'Incorporate evaluated suggestion ': '将已评估的建议纳入计划 ',
+        'Resolve design dispute: ': '裁决设计争议：',
+        'Resolve repeated review disagreement using evidence: ': '根据证据裁决反复出现的审查分歧：',
+        'Decide implementation design gap: ': '裁决实现中的设计缺口：',
+        'Direction review: ': '方向审查：', 'Review: ': '审查意见：',
+        'revision ': '指令版本 ', 'planner: ': '规划执行者：', 'architect: ': '设计执行者：',
+        'implementer: ': '实现执行者：', 'reviewer: ': '审查执行者：',
+      };
+      for (const [prefix, label] of Object.entries(prefixes)) {
+        if (typeof text === 'string' && text.startsWith(prefix)) return label + text.slice(prefix.length);
+      }
+      return this.statusLabel(text);
+    },
+
     developmentRole(role) {
       return { planner: '规划 · 强模型', implementer: '实现 · 普通模型', reviewer: '独立审查', architect: '设计／方向 · 强模型', integration: '合并与集成验证' }[role] || role;
     },
@@ -114,7 +150,7 @@ function developmentFeatures() {
         const result = await fetch(url, {
           headers: { 'X-Cairn-Operator-Token': this.operatorToken }
         });
-        if (!result.ok) throw new Error((await result.json()).detail || `HTTP ${result.status}`);
+        if (!result.ok) throw new Error(this.requestError((await result.json()).detail || `HTTP ${result.status}`));
         this.developmentArtifact = { open: true, name, text: await result.text() };
       } catch (error) { this.showToast(error.message, 'error'); }
     },
