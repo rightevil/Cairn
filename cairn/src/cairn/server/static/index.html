@@ -13,6 +13,7 @@
 <script src="/static/vendor/cytoscape-klay.js"></script>
 <script src="/static/vendor/elk.bundled.js"></script>
 <script src="/static/vendor/cytoscape-elk.js"></script>
+<script src="/static/development.js"></script>
 <script defer src="/static/vendor/alpine.min.js"></script>
 <style>
   [x-cloak] { display: none !important; }
@@ -576,6 +577,7 @@
     <!-- Side panel -->
     <div class="border-l border-slate-200/60 bg-white flex flex-col overflow-hidden shrink-0 relative z-20" :style="{ width: sidePanelWidth + 'px', minWidth: sidePanelWidth + 'px', flexBasis: sidePanelWidth + 'px' }">
       <div class="flex border-b border-slate-100 shrink-0">
+        <button x-show="project.project.development" @click="sideTab = 'development'" class="flex-1 px-3 py-2.5 text-xs font-medium" :class="sideTab === 'development' ? 'text-brand-600 border-b-2 border-brand-500' : 'text-slate-400'">开发</button>
         <button @click="sideTab = 'detail'" class="flex-1 px-3 py-2.5 text-xs font-medium transition"
           :class="sideTab === 'detail' ? 'text-brand-600 border-b-2 border-brand-500' : 'text-slate-400 hover:text-slate-600'">Detail</button>
         <button @click="sideTab = 'hints'" class="flex-1 px-3 py-2.5 text-xs font-medium transition"
@@ -587,6 +589,91 @@
       </div>
 
       <!-- Detail -->
+      <div x-show="sideTab === 'development'" class="flex-1 overflow-y-auto p-4 space-y-4 bg-slate-50">
+        <template x-if="project.project.development">
+          <div class="space-y-4">
+            <section class="rounded-xl border bg-white p-3 space-y-2">
+              <h3 class="font-semibold text-sm">项目运行</h3>
+              <p class="text-xs break-all" x-text="project.project.development.repository"></p>
+              <p class="text-xs text-slate-500">集成分支：<span x-text="project.project.development.integration_branch || '首次执行时绑定当前分支'"></span></p>
+              <p x-show="project.project.development.milestone" class="text-xs" x-text="'当前里程碑：' + project.project.development.milestone"></p>
+              <details x-show="project.project.development.architecture" class="text-xs"><summary class="cursor-pointer text-teal-700" x-text="'已决定的设计 · v' + project.project.development.design_revision"></summary><p class="mt-2 whitespace-pre-wrap break-words" x-text="project.project.development.architecture"></p><p x-show="project.project.development.architecture_control_revision < project.project.development.revision" class="text-amber-700 mt-1">设计等待按当前指令复核。</p></details>
+              <p class="text-xs" x-text="project.project.development.wait_reason || (project.project.status === 'stopped' ? '已暂停，保留当前工作' : project.project.status === 'completed' ? '项目已完成验证' : '按项目设计自主推进')"></p>
+              <p x-show="project.project.development.requested_revision > project.project.development.revision" class="text-xs text-amber-700">新指令已采纳，等待安全检查点生效。</p>
+              <p x-show="developmentError" class="text-xs text-amber-700" x-text="developmentError"></p>
+              <button @click="showLocalPrefs = true" class="text-xs text-brand-600">操作令牌设置</button>
+              <button @click="stopDevelopment()" :disabled="project.project.status !== 'active' || replay.active" class="ml-3 text-xs text-rose-600 disabled:opacity-40">立即停止</button>
+            </section>
+            <section class="rounded-xl border bg-white p-3 space-y-2">
+              <h3 class="font-semibold text-sm">向黑板添加调整</h3>
+              <select x-model="developmentControl.kind" aria-label="调整类型" class="w-full border rounded-lg p-2 text-xs">
+                <option value="suggestion">建议：独立评估后决定是否采用</option><option value="directive">指令：直接采用，检查点生效</option>
+              </select>
+              <select x-model="developmentControl.scope" aria-label="调整范围" class="w-full border rounded-lg p-2 text-xs">
+                <option value="">整个项目</option>
+                <template x-for="intent in developmentWork().filter(i => i.work.role === 'implementer')" :key="intent.id"><option :value="intent.id" x-text="intent.description"></option></template>
+              </select>
+              <select x-show="developmentControl.kind === 'directive'" x-model="developmentControl.replaces" aria-label="替代指令" class="w-full border rounded-lg p-2 text-xs">
+                <option value="">新增指令</option>
+                <template x-for="hint in activeDirectives()" :key="hint.id"><option :value="hint.id" x-text="'替代：' + hint.content.slice(0, 60)"></option></template>
+              </select>
+              <textarea x-model="developmentControl.content" @input="if ($event.target.value.startsWith('【指令】')) developmentControl.kind = 'directive'; else if ($event.target.value.startsWith('【建议】')) developmentControl.kind = 'suggestion'" aria-label="调整内容" rows="3" placeholder="描述你的观察、建议或明确要求" class="w-full border rounded-lg p-2 text-sm"></textarea>
+              <button @click="submitDevelopmentControl()" :disabled="!operatorToken || !developmentControl.content.trim() || replay.active" class="px-3 py-1.5 bg-brand-500 text-white rounded-lg text-xs disabled:opacity-40">提交调整</button>
+              <p x-show="project.project.status === 'stopped'" class="text-xs text-slate-400">调整会保存，项目保持暂停。</p>
+            </section>
+            <section class="space-y-2">
+              <h3 class="font-semibold text-sm">调整回执</h3>
+              <template x-for="hint in project.hints.filter(h => h.control).slice().reverse()" :key="hint.id">
+                <article class="rounded-xl border bg-white p-3 text-xs space-y-1">
+                  <div class="flex justify-between gap-2"><span class="font-medium" x-text="hint.control.kind === 'directive' ? '用户指令' : hint.control.source === 'agent' ? '范围外提议' : '建议'"></span><span class="text-teal-700" x-text="controlState(hint.control.state)"></span></div>
+                  <p class="whitespace-pre-wrap break-words" x-text="hint.content"></p>
+                  <p class="text-slate-500 whitespace-pre-wrap" x-text="hint.control.assessment"></p>
+                  <button x-show="hint.control.source === 'operator' && !['revoked', 'replaced'].includes(hint.control.state)" @click="revokeDevelopmentControl(hint.id)" :disabled="replay.active" class="text-rose-500">撤销</button>
+                </article>
+              </template>
+            </section>
+            <section class="space-y-2">
+              <h3 class="font-semibold text-sm">工作与成果</h3>
+              <p class="text-[11px] text-slate-500">提议 → 已决定 → 已实现 → 已合并 → 已验证</p>
+              <template x-for="intent in developmentWork()" :key="intent.id">
+                <details class="rounded-xl border bg-white p-3">
+                  <summary class="cursor-pointer text-xs space-y-1"><span class="text-teal-700 font-medium" x-text="developmentPhase(intent)"></span><span class="block font-medium" x-text="intent.description"></span><span class="block text-slate-400" x-text="intent.id + ' · ' + developmentRole(intent.work.role)"></span></summary>
+                  <div class="mt-3 text-xs space-y-2">
+                    <p class="whitespace-pre-wrap" x-text="intent.work.scope"></p>
+                    <p x-show="intent.work.resources?.length" class="text-slate-500 break-all" x-text="'互斥资源：' + (intent.work.resources || []).join(', ')"></p>
+                    <template x-for="criterion in intent.work.acceptance"><p class="text-slate-500" x-text="'• ' + criterion"></p></template>
+                    <p class="whitespace-pre-wrap break-words" x-text="intent.work.checkpoint"></p>
+                    <p x-show="intent.work.retry_at" class="text-amber-700" x-text="'恢复时间：' + formatTimelineDate(intent.work.retry_at)"></p>
+                    <p class="font-mono text-[10px] break-all" x-text="intent.work.branch || ''"></p>
+                    <a x-show="developmentLink(intent.work.pr_url)" :href="developmentLink(intent.work.pr_url)" target="_blank" rel="noopener noreferrer" class="text-brand-600">查看 PR</a>
+                    <p x-show="intent.work.merge_commit" class="font-mono text-[10px] break-all" x-text="'合并提交：' + intent.work.merge_commit"></p>
+                  </div>
+                </details>
+              </template>
+            </section>
+            <section class="space-y-2">
+              <h3 class="font-semibold text-sm">运行与原始证据</h3>
+              <template x-for="run in developmentState.runs" :key="run.id">
+                <details class="rounded-xl border bg-white p-3 text-xs">
+                  <summary class="cursor-pointer"><span x-text="developmentRole(run.role)"></span> · <span x-text="run.state"></span><span class="block text-slate-400" x-text="formatTimelineDate(run.started_at)"></span></summary>
+                  <p class="mt-2 whitespace-pre-wrap break-words" x-text="run.detail || run.checkpoint"></p>
+                  <p class="text-slate-500" x-text="run.result?.snapshot?.requested_model ? '请求模型：' + run.result.snapshot.requested_model : ''"></p>
+                  <div x-show="run.state === 'running'" class="mt-2 flex gap-3"><button x-show="run.streams?.stdout" @click="viewDevelopmentStream(run, 'stdout')" class="text-brand-600 underline">实时输出</button><button x-show="run.streams?.stderr" @click="viewDevelopmentStream(run, 'stderr')" class="text-brand-600 underline">实时错误</button></div>
+                  <div class="mt-2 flex flex-wrap gap-2"><template x-for="(item, index) in run.evidence" :key="index"><button @click="viewDevelopmentEvidence(run, index)" class="text-brand-600 underline" x-text="item.path.split(/[\\/]/).pop() + (item.exit_code !== null ? ' [' + item.exit_code + ']' : '')"></button></template></div>
+                </details>
+              </template>
+            </section>
+            <section x-show="developmentState.operations.length" class="space-y-2">
+              <h3 class="font-semibold text-sm">外部操作记录</h3>
+              <template x-for="operation in developmentState.operations" :key="operation.key"><div class="rounded-xl border bg-white p-3 text-xs"><p class="font-medium" x-text="operation.key"></p><p x-text="operation.state === 'unknown' ? '结果待核对，禁止盲目重放' : operation.state"></p><p class="break-all text-slate-500" x-text="operation.resource_id || operation.evidence"></p></div></template>
+            </section>
+            <section class="space-y-2">
+              <h3 class="font-semibold text-sm">流程事件</h3>
+              <template x-for="event in developmentState.events.slice(0, 30)" :key="event.id"><div class="border-l-2 border-teal-200 pl-3 text-xs"><p class="whitespace-pre-wrap break-words" x-text="event.detail"></p><p class="text-slate-400" x-text="formatTimelineDate(event.created_at)"></p></div></template>
+            </section>
+          </div>
+        </template>
+      </div>
       <div x-show="sideTab === 'detail'" class="flex-1 overflow-y-auto p-4 space-y-4 bg-slate-50/40">
         <template x-if="!selectedNode">
           <div class="rounded-2xl border border-dashed border-slate-200 bg-white/80 px-5 py-10 text-center shadow-sm">
@@ -795,13 +882,24 @@
 
 <!-- New Project -->
 <div x-show="showNewProject" x-cloak class="fixed inset-0 z-50 flex items-center justify-center overlay" @click.self="showNewProject = false">
-  <div class="bg-white rounded-2xl shadow-2xl w-full max-w-lg p-6 border border-slate-200/60" @click.stop>
+  <div class="bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto p-6 border border-slate-200/60" @click.stop>
     <h3 class="text-base font-semibold text-slate-700 mb-4">New Project</h3>
+    <div class="mb-4 space-y-3">
+      <label class="flex items-center gap-2 text-sm"><input type="checkbox" x-model="newDevelopment.enabled"> 软件开发项目</label>
+      <div x-show="newDevelopment.enabled" class="space-y-3">
+        <label class="block text-xs text-slate-500">仓库绝对路径<input x-model="newDevelopment.repository" placeholder="项目仓库根目录的绝对路径" class="mt-1 w-full border rounded-lg p-2 text-sm"></label>
+        <label class="block text-xs text-slate-500">集成分支（留空使用当前分支）<input x-model="newDevelopment.integration_branch" class="mt-1 w-full border rounded-lg p-2 text-sm"></label>
+        <label class="block text-xs text-slate-500">项目设计与范围（可从下方目标开始）<textarea x-model="newDevelopment.design" rows="3" class="mt-1 w-full border rounded-lg p-2 text-sm"></textarea></label>
+        <label class="block text-xs text-slate-500">项目检查命令（可选，由规划者补充工作包检查）<textarea x-model="newDevelopment.checks" rows="2" placeholder='[["python", "-m", "pytest", "-q"]]' class="mt-1 w-full border rounded-lg p-2 font-mono text-xs"></textarea></label>
+        <label class="block text-xs text-slate-500">操作令牌<input type="password" x-model="operatorToken" autocomplete="off" class="mt-1 w-full border rounded-lg p-2 text-sm"></label>
+        <p class="text-xs text-slate-400">令牌文件路径由服务启动时显示；仅保存在当前浏览器会话。</p>
+      </div>
+    </div>
     <div class="space-y-3">
       <input x-model="newProject.title" placeholder="Project title" class="w-full px-3 py-2 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-brand-100 focus:border-brand-400 transition placeholder:text-slate-300">
       <textarea x-model="newProject.origin" placeholder="Origin — starting point" rows="2" class="w-full px-3 py-2 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-brand-100 focus:border-brand-400 transition placeholder:text-slate-300"></textarea>
       <textarea x-model="newProject.goal" placeholder="Goal — what to achieve" rows="2" class="w-full px-3 py-2 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-brand-100 focus:border-brand-400 transition placeholder:text-slate-300"></textarea>
-      <label class="flex items-center gap-2 px-1 text-sm text-slate-600">
+      <label x-show="!newDevelopment.enabled" class="flex items-center gap-2 px-1 text-sm text-slate-600">
         <input type="checkbox" x-model="newProject.bootstrap" class="h-4 w-4 rounded border-slate-300 text-brand-500 focus:ring-brand-200">
         <span>Run bootstrap attempt</span>
       </label>
@@ -960,6 +1058,10 @@
 <div x-show="showLocalPrefs" x-cloak class="fixed inset-0 z-50 flex items-center justify-center overlay" @click.self="showLocalPrefs = false">
   <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 border border-slate-200/60" @click.stop>
     <h3 class="text-base font-semibold text-slate-700 mb-4">Local Preferences</h3>
+    <label class="block mb-4 text-xs text-slate-500">开发项目操作令牌
+      <input type="password" x-model="operatorToken" autocomplete="off" class="mt-1 w-full border rounded-lg p-2 text-sm">
+      <span class="block mt-1 text-slate-400">使用启动服务时显示的 operator-token 文件内容；留空并保存可清除。</span>
+    </label>
     <div class="space-y-4">
       <div>
         <label class="text-[11px] text-slate-400 mb-1 block font-medium">Actor</label>
@@ -1056,6 +1158,13 @@
   </div>
 </div>
 
+<div x-show="developmentArtifact.open" x-cloak class="fixed inset-0 z-50 flex items-center justify-center overlay" @click.self="developmentArtifact.open = false">
+  <div class="bg-white rounded-2xl shadow-2xl w-full max-w-4xl p-5 m-5">
+    <div class="flex justify-between mb-3"><h3 class="font-semibold text-sm" x-text="developmentArtifact.name"></h3><button @click="developmentArtifact.open = false" class="text-sm text-slate-500">关闭</button></div>
+    <pre class="max-h-[75vh] overflow-auto text-xs font-mono whitespace-pre-wrap break-words bg-slate-50 p-4 rounded-xl" x-text="developmentArtifact.text"></pre>
+  </div>
+</div>
+
 <!-- Toast -->
 <div x-show="toast.show" x-cloak
   x-transition:enter="transition ease-out duration-300"
@@ -1072,6 +1181,7 @@
 <script>
 function cairnApp() {
   return {
+    ...developmentFeatures(),
     view: 'list',
     projects: [],
     project: null,
@@ -1161,6 +1271,7 @@ function cairnApp() {
 
     async api(method, path, body) {
       const opts = { method, headers: { 'Content-Type': 'application/json' } };
+      if (this.operatorToken) opts.headers['X-Cairn-Operator-Token'] = this.operatorToken;
       if (body) opts.body = JSON.stringify(body);
       const r = await fetch(path, opts);
       if (r.status === 204) return null;
@@ -1325,7 +1436,7 @@ function cairnApp() {
     },
 
     canActOnSelectedFacts() {
-      return this.projectIsActive() && this.selectedFacts.length > 0 && !this.selectedFacts.includes('goal');
+      return !this.project?.project?.development && this.projectIsActive() && this.selectedFacts.length > 0 && !this.selectedFacts.includes('goal');
     },
 
     async loadProjects() {
@@ -1585,7 +1696,10 @@ function cairnApp() {
     },
 
     async loadProject(id) {
-      try { this.project = await this.api('GET', `/projects/${id}`); } catch(e) { this.showToast(e.message, 'error'); }
+      try {
+        this.project = await this.api('GET', `/projects/${id}`);
+        if (this.project.project.development) await this.loadDevelopment(id);
+      } catch(e) { this.showToast(e.message, 'error'); }
     },
 
     async toggleProjectStop() {
@@ -2846,6 +2960,7 @@ function cairnApp() {
     },
 
     selectedActionableOpenIntentRecord() {
+      if (this.project?.project?.development) return null;
       const intent = this.selectedOpenIntentRecord();
       if (!intent) return null;
       const actor = this.actorName();
@@ -2853,6 +2968,7 @@ function cairnApp() {
     },
 
     selectedReleasableOpenIntentRecord() {
+      if (this.project?.project?.development) return null;
       const intent = this.selectedOpenIntentRecord();
       if (!intent?.worker) return null;
       return intent.worker === this.actorName() ? intent : null;
@@ -3270,11 +3386,14 @@ function cairnApp() {
           goal: this.newProject.goal,
           bootstrap_enabled: this.newProject.bootstrap
         };
+        const development = this.developmentConfiguration();
+        if (development) { body.development = development; body.bootstrap_enabled = false; }
         const hints = hintContents.map(h => ({ content: h.content.trim(), creator: actor }));
         if (hints.length > 0) body.hints = hints;
         const data = await this.api('POST', '/projects', body);
         this.showNewProject = false;
         this.newProject = { title:'', origin:'', goal:'', bootstrap: true, hints: [{ content:'' }] };
+        this.newDevelopment = { enabled: true, repository: '', integration_branch: '', design: '', checks: '' };
         await this.loadProjects();
         await this.openProject(data.project.id);
         this.showToast('Project created');
@@ -3349,6 +3468,7 @@ function cairnApp() {
     },
 
     openHintModal() {
+      if (this.project?.project?.development) { this.sideTab = 'development'; return; }
       if (!this.projectCanWriteHints()) return;
       this.hintForm = { content:'' };
       this.showHintModal = true;
@@ -3382,6 +3502,7 @@ function cairnApp() {
 
     saveLocalSettings() {
       try {
+        this.saveOperatorToken();
         this.localPrefs.actor_name = this.actorName();
         this.localPrefs.layout_mode = this.isValidLayoutMode(this.localPrefs.layout_mode) ? this.localPrefs.layout_mode : 'dagre_tb';
         this.layoutMode = this.localPrefs.layout_mode;

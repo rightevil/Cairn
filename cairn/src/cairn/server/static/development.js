@@ -1,0 +1,126 @@
+function developmentFeatures() {
+  return {
+    operatorToken: sessionStorage.getItem('cairn.operatorToken') || '',
+    developmentState: { runs: [], events: [], operations: [] },
+    developmentError: '',
+    developmentProjectId: '',
+    newDevelopment: { enabled: true, repository: '', integration_branch: '', design: '', checks: '' },
+    developmentControl: { kind: 'suggestion', content: '', scope: '', replaces: '' },
+    developmentArtifact: { open: false, name: '', text: '' },
+
+    saveOperatorToken() {
+      if (this.operatorToken.trim()) sessionStorage.setItem('cairn.operatorToken', this.operatorToken.trim());
+      else sessionStorage.removeItem('cairn.operatorToken');
+      this.operatorToken = this.operatorToken.trim();
+      if (this.selectedProjectId) this.loadDevelopment(this.selectedProjectId);
+    },
+
+    developmentConfiguration() {
+      if (!this.newDevelopment.enabled) return null;
+      if (!this.newDevelopment.repository.trim()) throw new Error('请输入仓库的绝对路径');
+      const checks = this.newDevelopment.checks.trim() ? JSON.parse(this.newDevelopment.checks) : [];
+      if (!Array.isArray(checks) || checks.some(argv => !Array.isArray(argv) || !argv.length || argv.some(arg => typeof arg !== 'string' || !arg.trim()))) {
+        throw new Error('检查命令应为参数数组，例如 [["python", "-m", "pytest", "-q"]]');
+      }
+      this.saveOperatorToken();
+      return { repository: this.newDevelopment.repository.trim(), integration_branch: this.newDevelopment.integration_branch.trim(),
+        design: this.newDevelopment.design.trim() || this.newProject.goal, checks };
+    },
+
+    async loadDevelopment(id) {
+      if (this.developmentProjectId !== id) {
+        this.developmentState = { runs: [], events: [], operations: [] };
+        this.developmentProjectId = id;
+      }
+      if (!this.project?.project?.development) return;
+      if (!this.operatorToken) {
+        this.developmentError = '在本地设置中填写操作令牌，即可查看运行证据和添加调整。令牌文件路径由服务启动时显示。';
+        return;
+      }
+      try {
+        const result = await this.api('GET', `/projects/${id}/development`);
+        if (this.selectedProjectId === id) this.developmentState = result;
+        this.developmentError = '';
+      } catch (error) { this.developmentError = error.message; }
+    },
+
+    developmentWork() {
+      return (this.project?.intents || []).filter(intent => intent.work).slice().reverse();
+    },
+
+    developmentRole(role) {
+      return { planner: '规划 · 强模型', implementer: '实现 · 普通模型', reviewer: '独立审查', architect: '设计／方向 · 强模型', integration: '合并与集成验证' }[role] || role;
+    },
+
+    developmentPhase(intent) {
+      const work = intent.work;
+      if (work.state === 'superseded') return '已替代';
+      if (work.role === 'implementer' && work.state === 'reviewing' && (!work.head_commit || work.result?.pending_design)) return '等待设计决策';
+      if (work.role === 'implementer') return { ready: '待实现', running: '实现中', waiting: '等待条件', implemented: '已实现', reviewing: '已实现 · 待审查', approved: '已实现 · 待合并', merged: '已合并 · 待验证', verified: '已验证', rejected: '需修订' }[work.state] || work.state;
+      if (work.role === 'planner') return work.state === 'verified' ? '已决定' : work.state === 'reviewing' ? '提议 · 待审查' : work.state === 'waiting' ? '等待条件' : '提议中';
+      if (work.result?.output?.verdict) return { approve: '审查通过', request_changes: '需修订', needs_design: '需设计决策', reject: '已拒绝', defer: '暂缓', experiment: '采用实验' }[work.result.output.verdict];
+      return work.state === 'verified' ? '已决定' : work.state === 'waiting' ? '等待条件' : '审查／决策中';
+    },
+
+    controlState(value) {
+      return { received: '已收到 · 待评估', accepted: '已采纳 · 待检查点', experiment: '采用实验', deferred: '暂缓', rejected: '未采纳', applied: '已生效', completed: '已完成验证', replaced: '已替代', revoked: '已撤销' }[value] || value;
+    },
+
+    activeDirectives() {
+      return (this.project?.hints || []).filter(h => h.control?.kind === 'directive' && !['revoked', 'replaced'].includes(h.control.state));
+    },
+
+    async submitDevelopmentControl() {
+      if (!this.developmentControl.content.trim()) return;
+      try {
+        await this.api('POST', `/projects/${this.selectedProjectId}/development/controls`, {
+          kind: this.developmentControl.kind, content: this.developmentControl.content.trim(),
+          scope: this.developmentControl.scope ? [this.developmentControl.scope] : [], replaces: this.developmentControl.replaces || null,
+        });
+        this.developmentControl.content = '';
+        this.developmentControl.replaces = '';
+        await this.loadProject(this.selectedProjectId);
+        this.updateGraph();
+        this.showToast(this.developmentControl.kind === 'directive' ? '指令已采纳，等待安全检查点生效' : '建议已提交独立评估');
+      } catch (error) { this.showToast(error.message, 'error'); }
+    },
+
+    async revokeDevelopmentControl(id) {
+      try {
+        await this.api('POST', `/projects/${this.selectedProjectId}/development/controls/${id}/revoke`, {});
+        await this.loadProject(this.selectedProjectId);
+        this.showToast('已记录撤销；受影响工作将在检查点调整');
+      } catch (error) { this.showToast(error.message, 'error'); }
+    },
+
+    async stopDevelopment() {
+      try {
+        const result = await this.api('POST', `/projects/${this.selectedProjectId}/development/stop`, {});
+        await this.loadProject(this.selectedProjectId);
+        this.showToast(result.state === 'stopped' ? '已暂停，工作与证据已保留' : '正在停止；运行记录会继续显示实际收尾状态');
+      } catch (error) { this.showToast(error.message, 'error'); }
+    },
+
+    async viewDevelopmentEvidence(run, index) {
+      return this.openDevelopmentPreview(`/projects/${this.selectedProjectId}/development/runs/${run.id}/evidence/${index}`, run.evidence[index].path.split(/[\\/]/).pop());
+    },
+
+    async viewDevelopmentStream(run, channel) {
+      return this.openDevelopmentPreview(`/projects/${this.selectedProjectId}/development/runs/${run.id}/stream/${channel}`, `${channel} · 实时输出（非验收证据）`);
+    },
+
+    async openDevelopmentPreview(url, name) {
+      try {
+        const result = await fetch(url, {
+          headers: { 'X-Cairn-Operator-Token': this.operatorToken }
+        });
+        if (!result.ok) throw new Error((await result.json()).detail || `HTTP ${result.status}`);
+        this.developmentArtifact = { open: true, name, text: await result.text() };
+      } catch (error) { this.showToast(error.message, 'error'); }
+    },
+
+    developmentLink(url) {
+      return /^https:\/\//.test(url || '') ? url : null;
+    },
+  };
+}
