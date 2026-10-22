@@ -39,6 +39,8 @@ def migrate(conn: sqlite3.Connection) -> None:
         if column not in {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT")
     conn.executescript(SCHEMA)
+    if "process_identity" not in {row["name"] for row in conn.execute("PRAGMA table_info(runs)")}:
+        conn.execute("ALTER TABLE runs ADD COLUMN process_identity TEXT")
 
 
 def dump(value: Any) -> str:

@@ -164,6 +164,9 @@ class CairnClient:
             return session
 
         session = requests.Session()
+        from urllib.parse import urlparse
+        if urlparse(self._base_url).hostname in ("localhost", "127.0.0.1", "::1"):
+            session.trust_env = False
         if self._worker_token:
             session.headers["X-Cairn-Worker-Token"] = self._worker_token
         adapter = HTTPAdapter(pool_connections=64, pool_maxsize=64, pool_block=False)

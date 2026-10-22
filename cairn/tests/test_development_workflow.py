@@ -132,3 +132,49 @@ def test_architecture_gap_is_sent_to_strong_role_while_other_work_remains_ready(
     finish(http, project, decision, {"kind": "decision", "summary": "Keep the database contract; add a compatibility handler inside the API"}, "architect")
     assert works(http, project)[implementation]["state"] == "ready"
     assert "compatibility" in works(http, project)[implementation]["result"]["design_decision"]
+
+
+def test_control_received_after_finish_still_fences_unapplied_result(http, tmp_path):
+    project, planner = create(http, tmp_path)
+    run = claim(http, project, planner).json()
+    http.post(f"/projects/{project}/development/runs/{run['id']}/finish", headers=WORKER,
+              json={"token": run["token"], "outcome": "success", "result": {"output": plan()}}).raise_for_status()
+    http.post(f"/projects/{project}/development/controls", headers=OPERATOR,
+              json={"kind": "directive", "content": "Change the current milestone"}).raise_for_status()
+    advance(http, project)
+    assert works(http, project)[planner]["state"] == "superseded"
+    assert not any(w["role"] == "architect" for w in works(http, project).values())
+
+
+def test_expired_run_requires_confirmed_stop_and_old_token_stays_fenced(http, tmp_path):
+    project, planner = create(http, tmp_path)
+    run = claim(http, project, planner).json()
+    url = f"/projects/{project}/development/runs/{run['id']}/recover"
+    body = {"host": "local-test", "confirmed_stopped": True, "detail": "owned process exited"}
+    assert http.post(url, headers=WORKER, json=body).status_code == 409
+    with db.get_conn() as conn:
+        conn.execute("UPDATE runs SET heartbeat_at='2000-01-01T00:00:00Z' WHERE id=?", (run["id"],))
+    assert http.post(url, headers=WORKER, json={**body, "confirmed_stopped": False}).status_code == 409
+    assert http.post(url, headers=WORKER, json=body).status_code == 200
+    assert http.post(f"/projects/{project}/development/runs/{run['id']}/finish", headers=WORKER,
+                     json={"token": run["token"], "outcome": "success", "result": {"output": plan()}}).status_code == 409
+    advance(http, project)
+    assert works(http, project)[planner]["state"] == "waiting"
+
+
+def test_completed_feature_requires_explicit_reviewed_revision_to_reimplement(http, tmp_path):
+    from cairn.server.development_models import DevelopmentOutcome
+    from cairn.server.development_workflow import install_plan
+    project, planner = create(http, tmp_path)
+    approve_plan(http, project, planner)
+    old = next(i for i, w in works(http, project).items() if w["key"] == "api")
+    with db.get_conn() as conn:
+        prior = store.work(conn, project, old)
+        prior.state = "verified"
+        store.save_work(conn, project, old, prior)
+        candidate = plan()
+        candidate["work"] = [{**candidate["work"][0], "supersedes": old, "description": "Revise the verified API under the new decision"}]
+        assert install_plan(conn, project, DevelopmentOutcome.model_validate(candidate), 1) == 1
+    values = works(http, project)
+    assert values[old]["state"] == "superseded"
+    assert len([w for w in values.values() if w["key"] == "api"]) == 2

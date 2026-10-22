@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 import subprocess
 import time
@@ -44,7 +45,12 @@ class DispatcherLoop:
     def __init__(self, config_path: Path):
         self.config_path = config_path
         self.config = DispatchConfig.load(config_path)
-        self.client = CairnClient(self.config.server)
+        token = os.environ.get("CAIRN_WORKER_TOKEN")
+        token_path = Path(self.config.worker_token_file).expanduser() if self.config.worker_token_file else Path.home() / ".local/share/cairn/cairn.worker-token"
+        if not token and token_path.is_file():
+            token = token_path.read_text(encoding="utf-8").strip()
+        self.client = CairnClient(self.config.server, worker_token=token) if token else CairnClient(self.config.server)
+        self.development = None
         if self.config.runtime.execution == "local":
             self.container_manager = LocalBackend(self.config.local or LocalConfig())
         else:
@@ -106,6 +112,10 @@ class DispatcherLoop:
                 if once:
                     break
                 time.sleep(self.config.runtime.interval)
+        except KeyboardInterrupt:
+            for task in self.futures.values():
+                task.cancellation.cancel("Dispatcher shutting down")
+            raise
         finally:
             self.close()
 
@@ -132,7 +142,7 @@ class DispatcherLoop:
     def _run_local_binary_check(self) -> None:
         binaries: dict[str, list[str]] = {}
         for worker in self.config.workers:
-            binary = get_driver(worker.type, "local").local_binary()
+            binary = worker.command[0] if worker.command else get_driver(worker.type, "local").local_binary()
             if binary is None:
                 continue
             binaries.setdefault(binary, []).append(worker.name)
@@ -168,7 +178,7 @@ class DispatcherLoop:
             )
         LOG.warning(
             "[!] Local mode uses each CLI's own host config: make sure %s already logged in / "
-            "configured and usable directly (e.g. `claude -p ...` works) — Cairn injects no API keys.",
+            "configured and usable directly; worker-specific model/provider environment overrides are applied.",
             ", ".join(sorted(available)),
         )
 
@@ -252,6 +262,11 @@ class DispatcherLoop:
         return [by_id[project_id] for project_id in ordered_ids]
 
     def _try_dispatch_project(self, summary: ProjectSummary) -> bool:
+        if summary.development is not None:
+            if getattr(self, "development", None) is None:
+                from cairn.dispatcher.development import DevelopmentDispatcher
+                self.development = DevelopmentDispatcher(self)
+            return self.development.try_dispatch(summary)
         skip_scope = f"project:{summary.id}:skip"
         container_name = self.container_manager.container_name(summary.id)
         if container_name in self._cleanup_pending:
@@ -814,6 +829,7 @@ class DispatcherLoop:
             self._cleanup_pending.add(container_name)
 
     def _queue_container_cleanups(self, summaries: list[ProjectSummary]) -> None:
+        summaries = [summary for summary in summaries if summary.development is None]
         self._cleanup_completed_containers(summaries)
         self._cleanup_stopped_containers(summaries)
 

@@ -59,3 +59,19 @@ def test_credentials_resolve_from_named_environment_without_global_config_mutati
     monkeypatch.setenv("MAGPIE_TEST_TOKEN", "local-test-only")
     role = worker(env_from={"ANTHROPIC_AUTH_TOKEN": "MAGPIE_TEST_TOKEN"})
     assert role.env["ANTHROPIC_AUTH_TOKEN"] == "local-test-only"
+
+
+def test_loopback_server_bypasses_host_proxy_and_remote_servers_keep_it():
+    from cairn.dispatcher.protocol.client import CairnClient
+    for url, trust_env in [("http://127.0.0.1:8000", False), ("http://localhost:8000", False), ("https://example.org", True)]:
+        client = CairnClient(url)
+        assert client._session().trust_env is trust_env
+        client.close()
+
+
+def test_real_capacity_reset_information_is_used_without_a_project_budget():
+    from cairn.dispatcher.development import capacity_retry_at, classify_failure
+    assert classify_failure("429 quota exceeded")[0] == "capacity"
+    assert capacity_retry_at('429 {"reset_at":"2099-01-01T00:00:00Z"}') == "2099-01-01T00:00:00Z"
+    assert capacity_retry_at("Retry-After: 60") is not None
+    assert capacity_retry_at("unknown reset time") is None

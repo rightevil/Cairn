@@ -26,7 +26,7 @@ def http(tmp_path, monkeypatch):
 def create(http, tmp_path):
     response = http.post("/projects", headers=OPERATOR, json={
         "title": "development", "origin": "existing code", "goal": "release a useful application",
-        "development": {"repository": str(tmp_path), "design": "Stay within the agreed application scope"},
+        "development": {"repository": str(tmp_path), "design": "Stay within the agreed application scope", "checks": [["git", "diff", "--check"]]},
     })
     assert response.status_code == 201, response.text
     data = response.json()

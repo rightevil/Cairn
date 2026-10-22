@@ -47,6 +47,7 @@ class LocalProcess:
         self._cancel_reason: str | None = None
         self._kill_lock = threading.Lock()
         self._job = None
+        self.on_started = None
 
     def start(self) -> None:
         if os.name == "nt":
@@ -70,14 +71,17 @@ class LocalProcess:
             if self._job is not None:
                 self._job.close()
             raise
-        if self._job is not None:
-            try:
+        try:
+            if self.on_started is not None:
+                self.on_started(self)
+            if self._job is not None:
                 self._job.assign_and_resume(self._process.pid)
-            except Exception:
-                self._process.kill()
-                self._process.wait()
+        except Exception:
+            self._process.kill()
+            self._process.wait()
+            if self._job is not None:
                 self._job.close()
-                raise
+            raise
         self._stdout_thread = threading.Thread(
             target=self._drain, args=(self._process.stdout, self._stdout_chunks), daemon=True
         )
@@ -86,6 +90,10 @@ class LocalProcess:
         )
         self._stdout_thread.start()
         self._stderr_thread.start()
+
+    @property
+    def pid(self) -> int | None:
+        return self._process.pid if self._process else None
 
     def communicate(self, timeout: float | None) -> ProcessResult:
         assert self._process is not None

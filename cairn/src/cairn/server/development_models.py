@@ -25,6 +25,8 @@ class DevelopmentProject(DevelopmentModel):
     state: Literal["active", "waiting", "completed"] = "active"
     wait_reason: str = ""
     wake_at: str | None = None
+    direction_review_every: int = Field(default=3, ge=1)
+    direction_checkpoint: int = 0
 
 
 class WorkPackage(DevelopmentModel):
@@ -38,7 +40,7 @@ class WorkPackage(DevelopmentModel):
     checks: list[list[str]] = Field(default_factory=list)
     dependencies: list[str] = Field(default_factory=list)
     subject: str | None = None
-    purpose: Literal["plan", "implementation", "suggestion", "arbitration", "milestone"] = "implementation"
+    purpose: Literal["plan", "implementation", "suggestion", "arbitration", "milestone", "direction"] = "implementation"
     branch: str | None = None
     base_commit: str | None = None
     head_commit: str | None = None
@@ -58,6 +60,7 @@ class PlannedWork(DevelopmentModel):
     acceptance: list[str] = Field(min_length=1)
     checks: list[list[str]] = Field(default_factory=list)
     dependencies: list[str] = Field(default_factory=list)
+    supersedes: str | None = None
 
 
 class DevelopmentOutcome(DevelopmentModel):
@@ -69,6 +72,7 @@ class DevelopmentOutcome(DevelopmentModel):
     wake_at: str | None = None
     project_complete: bool = False
     evidence: list[str] = Field(default_factory=list)
+    affected: list[str] = Field(default_factory=list)
 
 
 class Control(DevelopmentModel):
@@ -94,6 +98,7 @@ class RunUpdate(DevelopmentModel):
     token: str = Field(min_length=1)
     session: str | None = None
     pid: int | None = None
+    process_identity: str | None = None
     checkpoint: str | None = None
 
 
@@ -131,3 +136,19 @@ class OperationResult(RunUpdate):
     state: Literal["unknown", "done", "absent"]
     resource_id: str | None = None
     evidence: str = Field(min_length=1)
+
+
+class WorkspaceUpdate(RunUpdate):
+    branch: str
+    base_commit: str
+    worktree: str
+
+
+class RepositoryBinding(DevelopmentModel):
+    integration_branch: str = Field(min_length=1)
+
+
+class RecoveryRequest(DevelopmentModel):
+    host: str
+    confirmed_stopped: bool
+    detail: str

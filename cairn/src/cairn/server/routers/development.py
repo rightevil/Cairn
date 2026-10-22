@@ -4,6 +4,8 @@ import hmac
 import json
 import secrets
 import uuid
+import hashlib
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
@@ -12,7 +14,7 @@ from cairn.server.access import require_operator, require_reader, require_worker
 from cairn.server.db import get_conn
 from cairn.server.development_models import (
     Control, ControlRequest, DevelopmentProject, OperationRequest, OperationResult,
-    RunClaim, RunFinish, RunUpdate, WorkPackage,
+    RunClaim, RunFinish, RunUpdate, WorkPackage, WorkspaceUpdate, RepositoryBinding, RecoveryRequest,
 )
 from cairn.server import development_store as store
 from cairn.server.services import get_project_or_404, next_hint_id, utcnow
@@ -26,6 +28,49 @@ def advance(project_id: str):
     with get_conn() as conn:
         apply(conn, project_id)
         return {"state": store.project(conn, project_id).state}
+
+
+@router.post("/bind", dependencies=[Depends(require_worker)])
+def bind(project_id: str, body: RepositoryBinding):
+    with get_conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        config = store.project(conn, project_id)
+        if config.integration_branch and config.integration_branch != body.integration_branch:
+            raise HTTPException(409, "Integration branch is already bound")
+        config.integration_branch = body.integration_branch
+        store.save_project(conn, project_id, config)
+        return config
+
+
+@router.post("/runs/{run_id}/workspace", dependencies=[Depends(require_worker)])
+def workspace(project_id: str, run_id: str, body: WorkspaceUpdate):
+    with get_conn() as conn:
+        row = live_run(conn, project_id, run_id, body.token)
+        value = store.work(conn, project_id, row["intent_id"])
+        if value.role != "implementer":
+            raise HTTPException(409, "Only implementation work owns a feature branch")
+        value.branch, value.base_commit, value.worktree = body.branch, body.base_commit, body.worktree
+        store.save_work(conn, project_id, row["intent_id"], value)
+        return value
+
+
+@router.post("/runs/{run_id}/recover", dependencies=[Depends(require_worker)])
+def recover(project_id: str, run_id: str, body: RecoveryRequest):
+    from datetime import datetime, timedelta, timezone
+    with get_conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT * FROM runs WHERE project_id=? AND id=?", (project_id, run_id)).fetchone()
+        if not row:
+            raise HTTPException(404, "Run not found")
+        if row["state"] != "running":
+            return public_run(row)
+        cutoff = (datetime.now(timezone.utc) - timedelta(seconds=60)).isoformat(timespec="seconds").replace("+00:00", "Z")
+        if row["host"] != body.host or row["heartbeat_at"] > cutoff or not body.confirmed_stopped:
+            raise HTTPException(409, "Recovery requires an expired local run and confirmed process termination")
+        conn.execute("UPDATE runs SET state='recovered',finished_at=?,detail=? WHERE id=?",
+                     (utcnow(), body.detail, run_id))
+        store.event(conn, project_id, "run_recovered", run_id, body.detail)
+        return {"state": "recovered"}
 
 
 def initialize(conn, project_id: str, config: DevelopmentProject) -> None:
@@ -59,6 +104,37 @@ def public_run(row):
     return data
 
 
+@router.get("/intents/{intent_id}/runs", dependencies=[Depends(require_reader)])
+def intent_runs(project_id: str, intent_id: str):
+    with get_conn() as conn:
+        store.work(conn, project_id, intent_id)
+        return [public_run(r) for r in conn.execute(
+            "SELECT * FROM runs WHERE project_id=? AND intent_id=? ORDER BY rowid DESC", (project_id, intent_id))]
+
+
+@router.get("/runs/{run_id}/evidence/{index}", dependencies=[Depends(require_reader)])
+def evidence(project_id: str, run_id: str, index: int):
+    from fastapi.responses import PlainTextResponse
+    with get_conn() as conn:
+        row = conn.execute("SELECT evidence FROM runs WHERE project_id=? AND id=?", (project_id, run_id)).fetchone()
+        if row is None:
+            raise HTTPException(404, "Run not found")
+        items = json.loads(row["evidence"])
+        if index < 0 or index >= len(items):
+            raise HTTPException(404, "Evidence not found")
+        item = items[index]
+        path = Path(item["path"]).resolve()
+        if path.parent.name != run_id or not path.is_file():
+            raise HTTPException(409, "Evidence is not in its owned run directory")
+        content = path.read_bytes()
+        if hashlib.sha256(content).hexdigest() != item["sha256"]:
+            raise HTTPException(409, "Evidence hash changed")
+        text = content[:2_000_000].decode("utf-8", errors="replace")
+        if len(content) > 2_000_000:
+            text += "\n[Preview truncated; full evidence retained on disk]"
+        return PlainTextResponse(text)
+
+
 @router.get("", dependencies=[Depends(require_reader)])
 def state(project_id: str):
     with get_conn() as conn:
@@ -66,7 +142,8 @@ def state(project_id: str):
         return {
             "project": config,
             "runs": [public_run(r) for r in conn.execute(
-                "SELECT * FROM runs WHERE project_id=? ORDER BY started_at DESC LIMIT 100", (project_id,))],
+                "SELECT * FROM runs WHERE project_id=? AND (state='running' OR id IN "
+                "(SELECT id FROM runs WHERE project_id=? ORDER BY rowid DESC LIMIT 100)) ORDER BY rowid DESC", (project_id, project_id))],
             "operations": [dict(r) for r in conn.execute("SELECT * FROM operations WHERE project_id=?", (project_id,))],
             "events": [dict(r) for r in conn.execute(
                 "SELECT * FROM development_events WHERE project_id=? ORDER BY id DESC LIMIT 200", (project_id,))],
@@ -123,6 +200,10 @@ def claim(project_id: str, intent_id: str, body: RunClaim):
         for dependency in value.dependencies:
             if store.work(conn, project_id, dependency).state != "verified":
                 raise HTTPException(409, f"Dependency {dependency} is not verified")
+            source = conn.execute("SELECT to_fact_id FROM intents WHERE project_id=? AND id=?", (project_id, dependency)).fetchone()
+            if source and source["to_fact_id"]:
+                conn.execute("INSERT OR IGNORE INTO intent_sources(intent_id,project_id,fact_id) VALUES(?,?,?)",
+                             (intent_id, project_id, source["to_fact_id"]))
         if conn.execute("SELECT 1 FROM runs WHERE project_id=? AND intent_id=? AND state='running'",
                         (project_id, intent_id)).fetchone():
             raise HTTPException(409, "Work package already has a live run")
@@ -146,9 +227,10 @@ def heartbeat(project_id: str, run_id: str, body: RunUpdate):
         row = live_run(conn, project_id, run_id, body.token)
         config = store.project(conn, project_id)
         project_row = get_project_or_404(conn, project_id)
-        conn.execute("UPDATE runs SET heartbeat_at=?,session=COALESCE(?,session),pid=COALESCE(?,pid),"
+        conn.execute("UPDATE runs SET heartbeat_at=?,session=COALESCE(?,session),pid=COALESCE(?,pid),process_identity=COALESCE(?,process_identity),"
                      "checkpoint=COALESCE(?,checkpoint) WHERE id=?",
-                     (utcnow(), body.session, body.pid, body.checkpoint, run_id))
+                     (utcnow(), body.session, body.pid, body.process_identity, body.checkpoint, run_id))
+        conn.execute("UPDATE intents SET last_heartbeat_at=? WHERE project_id=? AND id=?", (utcnow(), project_id, row["intent_id"]))
         superseded = affected(conn, project_id, row["intent_id"], row["revision"])
         return {"cancel": project_row["status"] != "active", "checkpoint_requested": superseded,
                 "revision": config.revision, "requested_revision": config.requested_revision}
@@ -205,6 +287,9 @@ def add_control(conn, project_id: str, body: ControlRequest):
         config.requested_revision += 1
         config.state, config.wait_reason, config.wake_at = "active", "", None
         store.save_project(conn, project_id, config)
+        if get_project_or_404(conn, project_id)["status"] == "completed":
+            conn.execute("UPDATE projects SET status='active' WHERE id=?", (project_id,))
+            store.event(conn, project_id, "project_reopened", project_id, "New user directive requires further work")
     control = Control(kind=kind, source="operator", state="accepted" if kind == "directive" else "received",
                       revision=config.requested_revision, scope=body.scope, replaces=body.replaces)
     hint_id = next_hint_id(conn, project_id)
@@ -274,7 +359,7 @@ def reserve_operation(project_id: str, run_id: str, body: OperationRequest):
         return {"key": body.key, "state": "unknown", "execute": True}
 
 
-@router.put("/runs/{run_id}/operations/{key}")
+@router.put("/runs/{run_id}/operations/{key:path}")
 def reconcile_operation(project_id: str, run_id: str, key: str, body: OperationResult):
     with get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
@@ -284,6 +369,8 @@ def reconcile_operation(project_id: str, run_id: str, key: str, body: OperationR
             raise HTTPException(404, "Reserve an operation before recording it")
         if row["state"] == "done" and body.state != "done":
             raise HTTPException(409, "A completed operation cannot be reset for replay")
+        if row["state"] == "done" and row["resource_id"] and body.resource_id != row["resource_id"]:
+            raise HTTPException(409, "A completed operation cannot name a different resource")
         conn.execute("UPDATE operations SET state=?,resource_id=?,evidence=?,updated_at=? WHERE project_id=? AND key=?",
                      (body.state, body.resource_id, body.evidence, utcnow(), project_id, key))
         return {"key": key, "state": body.state}

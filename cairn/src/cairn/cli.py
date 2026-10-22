@@ -1,4 +1,6 @@
 from pathlib import Path
+import json
+import os
 
 import click
 import uvicorn
@@ -28,6 +30,11 @@ def main():
 def serve(host: str, port: int, db_path: str, log_level: str, access_log: bool):
     """Start the Cairn API server."""
     db.configure(Path(db_path))
+    from cairn.server.access import credential, credential_path
+    for role in ("operator", "worker"):
+        credential(role)
+        location = f"CAIRN_{role.upper()}_TOKEN environment" if os.environ.get(f"CAIRN_{role.upper()}_TOKEN") else str(credential_path(role))
+        click.echo(f"Development {role} credential: {location}", err=True)
     from cairn.server.app import app
 
     uvicorn.run(
@@ -65,3 +72,51 @@ def dispatch(config_path: Path, once: bool, startup_healthcheck_only: bool, log_
         loop.run(once=once)
     except RuntimeError as exc:
         raise click.ClickException(str(exc)) from exc
+
+
+@main.group()
+def operation():
+    """Reserve and reconcile external actions using the current run's scoped token."""
+
+
+def operation_request(action: str, payload: dict, method="POST"):
+    from cairn.dispatcher.protocol.client import CairnClient
+    required = ("CAIRN_SERVER", "CAIRN_PROJECT_ID", "CAIRN_RUN_ID", "CAIRN_RUN_TOKEN")
+    if any(not os.environ.get(name) for name in required):
+        raise click.ClickException("Operation commands require a Cairn-managed run environment")
+    client = CairnClient(os.environ["CAIRN_SERVER"])
+    try:
+        response = client._request_json(method,
+            f"/projects/{os.environ['CAIRN_PROJECT_ID']}/development/runs/{os.environ['CAIRN_RUN_ID']}/operations" + action,
+            {**payload, "token": os.environ["CAIRN_RUN_TOKEN"]})
+        if not response.ok:
+            raise click.ClickException(f"Operation request failed ({response.status_code}): {response.text}")
+        click.echo(json.dumps(response.data, ensure_ascii=False))
+    finally:
+        client.close()
+
+
+@operation.command("reserve")
+@click.option("--key", required=True)
+@click.option("--kind", required=True)
+@click.option("--request-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=True)
+def reserve_operation(key: str, kind: str, request_file: Path):
+    """Act only if execute=true; query real state before replaying an unknown action."""
+    try:
+        request = json.loads(request_file.read_text(encoding="utf-8"))
+    except (ValueError, OSError) as exc:
+        raise click.ClickException(f"Cannot read operation request: {exc}") from exc
+    if not isinstance(request, dict):
+        raise click.ClickException("Operation request must be a JSON object")
+    operation_request("", {"key": key, "kind": kind, "request": request})
+
+
+@operation.command("record")
+@click.option("--key", required=True)
+@click.option("--state", type=click.Choice(["unknown", "done", "absent"]), required=True)
+@click.option("--resource-id")
+@click.option("--evidence", required=True)
+def record_operation(key: str, state: str, resource_id: str | None, evidence: str):
+    """Record observed resource state; done operations can never be reset for replay."""
+    from urllib.parse import quote
+    operation_request("/" + quote(key, safe=""), {"state": state, "resource_id": resource_id, "evidence": evidence}, "PUT")

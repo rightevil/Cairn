@@ -37,14 +37,15 @@ def ready_planner(conn, project_id, reason):
         store.add_intent(conn, project_id, reason, WorkPackage(role="planner", purpose="plan", revision=config.revision))
 
 
-def retry(conn, project_id, intent_id, value, detail, retry_at=None):
-    value.failures += 1
+def retry(conn, project_id, intent_id, value, detail, retry_at=None, *, escalate=True):
+    if escalate:
+        value.failures += 1
     value.state = "waiting"
     value.checkpoint = detail
     value.retry_at = retry_at or (datetime.now(timezone.utc) + timedelta(
         seconds=min(300, 5 * 2 ** min(value.failures, 6)))).isoformat(timespec="seconds").replace("+00:00", "Z")
     store.save_work(conn, project_id, intent_id, value)
-    if value.role == "implementer" and value.failures >= 3:
+    if escalate and value.role == "implementer" and value.failures >= 3:
         if not any(w.purpose == "arbitration" and w.subject == intent_id and w.state in ("ready", "running")
                    for _, w in all_work(conn, project_id)):
             value.state, value.retry_at = "reviewing", None
@@ -59,6 +60,15 @@ def validate_plan(conn, project_id, outcome):
         raise ValueError("Plan must have nonempty unique work keys")
     existing = {key for intent_id, w in all_work(conn, project_id) for key in (intent_id, w.key) if key}
     dependencies = {w.key: set(w.dependencies) for w in outcome.work}
+    config = store.project(conn, project_id)
+    for proposed in outcome.work:
+        commands = config.checks or proposed.checks
+        if not commands or any(not argv or not all(arg.strip() for arg in argv) for argv in commands):
+            raise ValueError("Every work package needs runnable project or planned check commands")
+        if proposed.supersedes:
+            prior = store.work(conn, project_id, proposed.supersedes)
+            if prior.state not in ("verified", "superseded") or prior.key != proposed.key:
+                raise ValueError("A revision must explicitly supersede a completed work package with the same key")
     for key, deps in dependencies.items():
         if key in deps or deps - set(keys) - existing:
             raise ValueError(f"Invalid dependencies for {key}")
@@ -80,13 +90,22 @@ def install_plan(conn, project_id, outcome, revision):
     mapping.update({key: i for key, (i, _) in by_key.items()})
     created = []
     for proposed in outcome.work:
-        if proposed.key in by_key:
+        if proposed.key in by_key and not proposed.supersedes:
             continue  # A stable completed/active work key never silently becomes a new action.
+        if proposed.supersedes:
+            previous = store.work(conn, project_id, proposed.supersedes)
+            previous.state = "superseded"
+            store.save_work(conn, project_id, proposed.supersedes, previous)
         value = WorkPackage(key=proposed.key, scope=proposed.scope, acceptance=proposed.acceptance,
                             checks=proposed.checks, revision=revision)
         intent_id = store.add_intent(conn, project_id, proposed.description, value)
         mapping[proposed.key] = intent_id
         created.append((intent_id, proposed))
+        if proposed.supersedes:
+            for old_id, old in existing:
+                if old.state not in ("verified", "superseded") and proposed.supersedes in old.dependencies:
+                    old.dependencies = [intent_id if d == proposed.supersedes else d for d in old.dependencies]
+                    store.save_work(conn, project_id, old_id, old)
     for intent_id, proposed in created:
         value = store.work(conn, project_id, intent_id)
         value.dependencies = [mapping[d] for d in proposed.dependencies]
@@ -98,6 +117,20 @@ def apply_review(conn, project_id, run, value, outcome):
     if outcome.kind != "review" or outcome.verdict is None:
         raise ValueError("Review requires an explicit verdict and supporting summary")
     config = store.project(conn, project_id)
+    if value.purpose == "direction":
+        if outcome.verdict != "approve":
+            if not outcome.affected:
+                raise ValueError("A direction objection must identify affected work packages")
+            for intent_id in outcome.affected:
+                subject = store.work(conn, project_id, intent_id)
+                if subject.state in ("verified", "superseded"):
+                    continue
+                subject.state = "reviewing"
+                subject.checkpoint = "Direction review: " + outcome.summary
+                store.save_work(conn, project_id, intent_id, subject)
+                add_review(conn, project_id, intent_id, "arbitration", config.revision, subject.checkpoint)
+        value.state = "verified"
+        return
     if value.purpose == "suggestion":
         row = conn.execute("SELECT control FROM hints WHERE project_id=? AND id=?", (project_id, value.subject)).fetchone()
         control = Control.model_validate_json(row["control"])
@@ -106,6 +139,8 @@ def apply_review(conn, project_id, run, value, outcome):
         else:
             control.state = {"approve": "accepted", "request_changes": "deferred", "needs_design": "deferred",
                              "reject": "rejected", "defer": "deferred", "experiment": "experiment"}[outcome.verdict]
+            if not outcome.within_scope:
+                control.state = "deferred"
             control.assessment = outcome.summary
             conn.execute("UPDATE hints SET control=? WHERE project_id=? AND id=?",
                          (store.dump(control), project_id, value.subject))
@@ -164,6 +199,13 @@ def apply_review(conn, project_id, run, value, outcome):
             raise ValueError("Milestone completion requires independent integration checks")
         candidate = DevelopmentOutcome.model_validate(subject.result["output"])
         subject.state = "verified"
+        for hint in conn.execute("SELECT id,control FROM hints WHERE project_id=? AND control IS NOT NULL", (project_id,)):
+            control = Control.model_validate_json(hint["control"])
+            if control.kind == "directive" and control.state == "applied":
+                control.state = "completed"
+                control.assessment = "Independently verified at milestone: " + outcome.summary
+                conn.execute("UPDATE hints SET control=? WHERE project_id=? AND id=?", (store.dump(control), project_id, hint["id"]))
+                store.event(conn, project_id, "control_completed", hint["id"], control.assessment)
         if candidate.project_complete:
             conn.execute("UPDATE projects SET status='completed' WHERE id=?", (project_id,))
             config.state = "completed"
@@ -201,7 +243,14 @@ def apply_success(conn, project_id, run, value):
     if value.purpose == "arbitration":
         if value.role != "architect" or outcome.kind != "decision":
             raise ValueError("Architecture arbitration requires an independent strong-model decision")
+        if not outcome.within_scope:
+            raise ValueError("Architecture decisions cannot expand the approved project scope")
         subject = store.work(conn, project_id, value.subject)
+        if outcome.work:
+            if len(outcome.work) != 1 or outcome.work[0].key != subject.key:
+                raise ValueError("A design correction may update only the specified work package")
+            correction = outcome.work[0]
+            subject.scope, subject.acceptance, subject.checks = correction.scope, correction.acceptance, correction.checks
         subject.result["design_decision"] = outcome.summary
         subject.checkpoint = outcome.summary
         subject.state, subject.retry_at = "ready", None
@@ -233,7 +282,11 @@ def apply_success(conn, project_id, run, value):
         else:
             raise ValueError("Implementer must report implementation, design gap, proposal or wait")
     if value.state not in ("waiting", "superseded"):
-        fact(conn, project_id, run["intent_id"], outcome.summary)
+        fact_id = fact(conn, project_id, run["intent_id"], outcome.summary)
+        for review_id, review in all_work(conn, project_id):
+            if review.subject == run["intent_id"] and review.state == "ready":
+                conn.execute("INSERT OR IGNORE INTO intent_sources(intent_id,project_id,fact_id) VALUES(?,?,?)",
+                             (review_id, project_id, fact_id))
     store.event(conn, project_id, "work_updated", run["intent_id"], value.state + ": " + outcome.summary)
 
 
@@ -261,6 +314,11 @@ def checkpoint(conn, project_id):
             control.state = "applied"
             conn.execute("UPDATE hints SET control=? WHERE project_id=? AND id=?", (store.dump(control), project_id, row["id"]))
             store.event(conn, project_id, "control_applied", row["id"], f"revision {config.revision}")
+        elif control.kind == "suggestion" and control.state == "received":
+            if not any(w.purpose == "suggestion" and w.subject == row["id"] and w.state not in ("verified", "superseded")
+                       for _, w in all_work(conn, project_id)):
+                add_review(conn, project_id, row["id"], "suggestion", config.revision,
+                           "Evaluate the pending suggestion against the updated project direction")
     ready_planner(conn, project_id, "Replan affected work using current user directives")
 
 
@@ -270,7 +328,40 @@ def advance(conn, project_id):
     rows = conn.execute("SELECT * FROM runs WHERE project_id=? AND state!='running' AND applied=0 ORDER BY rowid", (project_id,)).fetchall()
     for run in rows:
         value = store.work(conn, project_id, run["intent_id"])
-        if run["state"] == "success":
+        from cairn.server.routers.development import affected
+        if run["state"] == "success" and affected(conn, project_id, run["intent_id"], run["revision"]):
+            value.state = "superseded"
+            value.merge_commit = run_result(run).get("snapshot", {}).get("merge_commit", value.merge_commit)
+            store.save_work(conn, project_id, run["intent_id"], value)
+            conn.execute("UPDATE runs SET state='superseded',applied=1 WHERE id=?", (run["id"],))
+            store.event(conn, project_id, "stale_result_rejected", run["id"], "Controls changed before result application")
+            continue
+        if run["role"] == "integration":
+            snapshot = run_result(run).get("snapshot", {})
+            if run["state"] == "superseded":
+                value.state = "superseded"
+                value.merge_commit = snapshot.get("merge_commit", value.merge_commit)
+            elif snapshot.get("needs_rebase"):
+                value.state, value.retry_at = "ready", None
+                value.result.pop("review", None)
+                value.result["review_feedback"] = snapshot.get("detail", "Rebase and recheck against current integration branch")
+            elif snapshot.get("merge_commit"):
+                value.merge_commit, value.pr_url = snapshot["merge_commit"], snapshot.get("pr_url")
+                if run["state"] == "success" and snapshot.get("checks_passed") and json.loads(run["evidence"]):
+                    value.state = "verified"
+                    value.result["integration"] = snapshot
+                    fact(conn, project_id, run["intent_id"], "Merged and verified: " + value.merge_commit)
+                else:
+                    value.state = "merged"
+                    value.result["integration_failure"] = snapshot
+                    add_review(conn, project_id, run["intent_id"], "arbitration", value.revision,
+                               "Resolve failed integration checks without undoing completed external actions")
+                store.event(conn, project_id, "integration_updated", run["intent_id"], value.state)
+            else:
+                value.state = "approved"
+                value.retry_at = run["retry_at"] or (datetime.now(timezone.utc) + timedelta(seconds=30)).isoformat(timespec="seconds").replace("+00:00", "Z")
+                value.checkpoint = run["detail"]
+        elif run["state"] == "success":
             conn.execute("SAVEPOINT apply_result")
             try:
                 apply_success(conn, project_id, run, value)
@@ -282,12 +373,20 @@ def advance(conn, project_id):
             finally:
                 conn.execute("RELEASE apply_result")
         elif run["state"] != "superseded":
-            retry(conn, project_id, run["intent_id"], value, run["detail"] or run["state"], run["retry_at"])
+            retry(conn, project_id, run["intent_id"], value, run["detail"] or run["state"], run["retry_at"],
+                  escalate=run["state"] == "failed")
         store.save_work(conn, project_id, run["intent_id"], value)
         conn.execute("UPDATE runs SET applied=1 WHERE id=?", (run["id"],))
     checkpoint(conn, project_id)
     config = store.project(conn, project_id)
     work = all_work(conn, project_id)
+    verified_count = sum(w.role == "implementer" and w.state == "verified" for _, w in work)
+    if verified_count - config.direction_checkpoint >= config.direction_review_every and not conn.execute(
+        "SELECT 1 FROM runs WHERE project_id=? AND state='running'", (project_id,)
+    ).fetchone():
+        add_review(conn, project_id, None, "direction", config.revision, "Review progress and remaining work against the agreed project design")
+        config.direction_checkpoint = verified_count
+        store.save_project(conn, project_id, config)
     if config.state == "active" and not any(
         w.state in ("ready", "running", "implemented", "reviewing", "approved", "merged", "waiting") for _, w in work
     ):

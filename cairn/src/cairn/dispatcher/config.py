@@ -48,6 +48,7 @@ DEFAULT_PROMPT_REQUIRED_TOKENS: dict[str, tuple[str, ...]] = {
 }
 
 PROMPT_REQUIRED_TOKENS_BY_GROUP: dict[str, dict[str, tuple[str, ...]]] = {
+    "development": {"task.md": ("{role}", "{context_path}", "{checkpoint_path}", "{result_schema}")},
     "mock": {
         "reason.md": ("{fact_ids}", "{open_intents}", "{max_intents}"),
         "explore.md": ("{intent_id}",),
@@ -204,6 +205,8 @@ class WorkerConfig(BaseModel):
             raise ValueError("task_types or roles must not be empty")
         if set(self.roles) & {"planner", "architect"} and self.tier != "strong":
             raise ValueError("planner and architect roles require the strong model tier")
+        if "implementer" in self.roles and self.tier != "standard":
+            raise ValueError("implementation roles require the standard model tier")
         if self.command is not None and (not self.command or not all(self.command)):
             raise ValueError("command must be a nonempty argv prefix")
         for target, source in self.env_from.items():
@@ -273,6 +276,9 @@ class DispatchConfig(BaseModel):
             raise ValueError("worker names must be unique")
         if not self.workers:
             raise ValueError("workers must not be empty")
+        roles = {role for worker in self.workers for role in worker.roles}
+        if roles and {"planner", "architect", "implementer", "reviewer"} - roles:
+            raise ValueError("development configuration requires planner, architect, implementer and reviewer roles")
         if self.runtime.max_project_workers > self.runtime.max_workers:
             raise ValueError("max_project_workers cannot exceed max_workers")
         return self
@@ -296,6 +302,12 @@ class DispatchConfig(BaseModel):
     def load(cls, path: Path) -> "DispatchConfig":
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         config = cls.model_validate(data)
+        if config.local and config.local.workspace_root:
+            root = Path(config.local.workspace_root).expanduser()
+            config.local.workspace_root = str((root if root.is_absolute() else path.resolve().parent / root).resolve())
+        if config.worker_token_file:
+            token_path = Path(config.worker_token_file).expanduser()
+            config.worker_token_file = str(token_path if token_path.is_absolute() else path.resolve().parent / token_path)
         validate_prompt_resources(config.runtime.prompt_group)
         return config
 

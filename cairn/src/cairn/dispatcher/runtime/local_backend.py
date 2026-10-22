@@ -48,8 +48,10 @@ class LocalBackend:
         kill_after_seconds: int = 5,
     ) -> LocalProcess:
         merged_env = {**os.environ, **(env or {})}
-        for key in ("CAIRN_OPERATOR_TOKEN", "CAIRN_WORKER_TOKEN"):
-            merged_env.pop(key, None)
+        merged_env = {k: v for k, v in merged_env.items()
+                      if k.upper() not in ("CAIRN_OPERATOR_TOKEN", "CAIRN_WORKER_TOKEN")}
+        bypass = merged_env.get("NO_PROXY", merged_env.get("no_proxy", ""))
+        merged_env["NO_PROXY"] = ",".join(filter(None, (bypass, "localhost", "127.0.0.1", "::1")))
         return LocalProcess(
             command,
             cwd=container_name,
