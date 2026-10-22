@@ -30,6 +30,17 @@ Cairn is a general-purpose problem-solving engine. <br/>It defines no roles, no 
 
 </div>
 
+## This fork: unattended software development
+
+本 fork 增加了面向软件开发的无人值守闭环：Magpie 按角色提供强／普通模型，
+复用 Claude Code、Codex 和已有 Pi；功能分支独立开发，经过独立审查、串行 PR
+合并与集成验证。原有网页图谱新增开发面板、建议／指令、运行日志和证据入口。
+
+从 中文使用指南（本地文档） 和
+[开发配置示例](dispatch.example.yaml) 开始；
+实现与验证清单（本地文档） 说明实际覆盖范围。
+下文保留上游通用探索模式的介绍；其中的无固定角色、容器和渗透测试描述适用于该模式。
+
 <p align="center">
   <a href="https://www.bilibili.com/video/BV1a8R5BhEVi/" target="_blank" rel="noopener noreferrer">
     <img src="./README/cairn.png" alt="Cairn runtime screenshot" width="900" />
