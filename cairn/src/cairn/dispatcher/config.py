@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from decimal import Decimal, InvalidOperation
+import os
 import json
 from importlib import resources
 from pathlib import Path
@@ -8,6 +9,7 @@ from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from cairn.server.development_models import Role
 
 
 TaskType = Literal["reason", "explore", "bootstrap"]
@@ -148,6 +150,7 @@ class TasksConfig(BaseModel):
     bootstrap: BootstrapTaskConfig
     reason: ReasonTaskConfig
     explore: ExploreTaskConfig
+    development_timeout: int = Field(default=3600, gt=0)
 
 
 class ContainerConfig(BaseModel):
@@ -178,22 +181,39 @@ class WorkerConfig(BaseModel):
 
     name: str
     type: WorkerType
-    task_types: list[TaskType]
+    task_types: list[TaskType] = Field(default_factory=list)
+    roles: list[Role] = Field(default_factory=list)
+    tier: Literal["strong", "standard"] = "standard"
+    model: str | None = None
+    command: list[str] | None = None
     max_running: int = Field(gt=0)
     priority: int = Field(ge=0)
     env: dict[str, str] = Field(default_factory=dict)
+    env_from: dict[str, str] = Field(default_factory=dict)
 
     @field_validator("task_types")
     @classmethod
     def validate_task_types(cls, value: list[TaskType]) -> list[TaskType]:
-        if not value:
-            raise ValueError("task_types must not be empty")
         if len(set(value)) != len(value):
             raise ValueError("task_types must be unique")
         return value
 
     @model_validator(mode="after")
     def validate_env(self) -> "WorkerConfig":
+        if not self.task_types and not self.roles:
+            raise ValueError("task_types or roles must not be empty")
+        if set(self.roles) & {"planner", "architect"} and self.tier != "strong":
+            raise ValueError("planner and architect roles require the strong model tier")
+        if self.command is not None and (not self.command or not all(self.command)):
+            raise ValueError("command must be a nonempty argv prefix")
+        for target, source in self.env_from.items():
+            if source not in os.environ:
+                raise ValueError(f"worker {self.name} requires environment variable {source}")
+            self.env[target] = os.environ[source]
+        if self.model:
+            key = {"claudecode": "ANTHROPIC_MODEL", "codex": "CODEX_MODEL", "pi": "PI_MODEL"}.get(self.type)
+            if key:
+                self.env[key] = self.model
         # Required LLM env keys (base_url / key / model) are enforced per execution mode by
         # DispatchConfig: container mode needs them, local mode reuses the host CLI config.
         # The checks below are mode-independent and always apply.
@@ -214,6 +234,7 @@ class DispatchConfig(BaseModel):
     local: LocalConfig | None = None
     common_env: dict[str, str] = Field(default_factory=dict)
     workers: list[WorkerConfig]
+    worker_token_file: str | None = None
 
     @model_validator(mode="before")
     @classmethod

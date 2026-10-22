@@ -28,12 +28,14 @@ class DevelopmentProject(DevelopmentModel):
 
 
 class WorkPackage(DevelopmentModel):
+    key: str = ""
     role: Role = "implementer"
     state: Literal["proposed", "ready", "running", "waiting", "implemented", "reviewing",
                    "approved", "merged", "verified", "rejected", "superseded"] = "ready"
     revision: int = Field(ge=1)
     scope: str = ""
     acceptance: list[str] = Field(default_factory=list)
+    checks: list[list[str]] = Field(default_factory=list)
     dependencies: list[str] = Field(default_factory=list)
     subject: str | None = None
     purpose: Literal["plan", "implementation", "suggestion", "arbitration", "milestone"] = "implementation"
@@ -47,6 +49,26 @@ class WorkPackage(DevelopmentModel):
     failures: int = 0
     checkpoint: str = ""
     result: dict[str, Any] = Field(default_factory=dict)
+
+
+class PlannedWork(DevelopmentModel):
+    key: str = Field(min_length=1)
+    description: str = Field(min_length=1)
+    scope: str = Field(min_length=1)
+    acceptance: list[str] = Field(min_length=1)
+    checks: list[list[str]] = Field(default_factory=list)
+    dependencies: list[str] = Field(default_factory=list)
+
+
+class DevelopmentOutcome(DevelopmentModel):
+    kind: Literal["plan", "implemented", "review", "decision", "wait", "needs_design", "complete", "proposal"]
+    summary: str = Field(min_length=1)
+    work: list[PlannedWork] = Field(default_factory=list)
+    verdict: Literal["approve", "request_changes", "needs_design", "reject", "defer", "experiment"] | None = None
+    within_scope: bool = True
+    wake_at: str | None = None
+    project_complete: bool = False
+    evidence: list[str] = Field(default_factory=list)
 
 
 class Control(DevelopmentModel):
@@ -65,6 +87,7 @@ class RunClaim(DevelopmentModel):
     role: Role
     revision: int
     host: str = Field(min_length=1)
+    phase: Literal["work", "integration"] = "work"
 
 
 class RunUpdate(DevelopmentModel):

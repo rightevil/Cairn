@@ -33,9 +33,10 @@ class ApiResult:
 
 
 class CairnClient:
-    def __init__(self, base_url: str, timeout: float = 10.0):
+    def __init__(self, base_url: str, timeout: float = 10.0, worker_token: str | None = None):
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
+        self._worker_token = worker_token
         self._summary_adapter = TypeAdapter(list[ProjectSummary])
         self._local = threading.local()
         self._sessions: dict[int, requests.Session] = {}
@@ -144,6 +145,16 @@ class CairnClient:
             data = response.json()
         return ApiResult(status_code=response.status_code, data=data, text=response.text)
 
+    def development(self, project_id: str, action: str = "", payload: dict[str, Any] | None = None) -> ApiResult:
+        path = f"/projects/{project_id}/development" + ("/" + action if action else "")
+        if payload is not None:
+            return self._request_json("POST", path, payload)
+        try:
+            response = self._session().get(self._url(path), timeout=self._timeout)
+            return ApiResult(response.status_code, response.json() if response.content else None, response.text)
+        except requests.RequestException as exc:
+            return ApiResult(0, text=str(exc))
+
     def _url(self, path: str) -> str:
         return f"{self._base_url}{path}"
 
@@ -153,6 +164,8 @@ class CairnClient:
             return session
 
         session = requests.Session()
+        if self._worker_token:
+            session.headers["X-Cairn-Worker-Token"] = self._worker_token
         adapter = HTTPAdapter(pool_connections=64, pool_maxsize=64, pool_block=False)
         session.mount("http://", adapter)
         session.mount("https://", adapter)

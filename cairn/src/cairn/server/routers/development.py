@@ -20,6 +20,14 @@ from cairn.server.services import get_project_or_404, next_hint_id, utcnow
 router = APIRouter(prefix="/projects/{project_id}/development", tags=["development"])
 
 
+@router.post("/advance", dependencies=[Depends(require_worker)])
+def advance(project_id: str):
+    from cairn.server.development_workflow import advance as apply
+    with get_conn() as conn:
+        apply(conn, project_id)
+        return {"state": store.project(conn, project_id).state}
+
+
 def initialize(conn, project_id: str, config: DevelopmentProject) -> None:
     from pathlib import Path
     if not Path(config.repository).is_absolute():
@@ -103,8 +111,15 @@ def claim(project_id: str, intent_id: str, body: RunClaim):
             raise HTTPException(409, "Role or control revision changed")
         if affected(conn, project_id, intent_id, body.revision):
             raise HTTPException(409, "New directive requires a checkpoint before dispatch")
-        if value.state not in ("ready", "waiting") or (value.retry_at and value.retry_at > utcnow()):
+        allowed = ("approved", "merged") if body.phase == "integration" else ("ready", "waiting")
+        if value.state not in allowed or (value.retry_at and value.retry_at > utcnow()):
             raise HTTPException(409, "Work package is not ready")
+        if body.phase == "integration" and (value.role != "implementer" or not value.result.get("review")):
+            raise HTTPException(409, "Integration requires a reviewed implementation")
+        if body.phase == "integration" and conn.execute(
+            "SELECT 1 FROM runs WHERE project_id=? AND role='integration' AND state='running'", (project_id,)
+        ).fetchone():
+            raise HTTPException(409, "Another merge is in progress")
         for dependency in value.dependencies:
             if store.work(conn, project_id, dependency).state != "verified":
                 raise HTTPException(409, f"Dependency {dependency} is not verified")
@@ -115,8 +130,9 @@ def claim(project_id: str, intent_id: str, body: RunClaim):
         now = utcnow()
         conn.execute("INSERT INTO runs(id,project_id,intent_id,worker,role,revision,token_hash,host,started_at,heartbeat_at) "
                      "VALUES(?,?,?,?,?,?,?,?,?,?)",
-                     (run_id, project_id, intent_id, body.worker, body.role, body.revision, token_hash(token), body.host, now, now))
-        value.state, value.retry_at = "running", None
+                     (run_id, project_id, intent_id, body.worker, "integration" if body.phase == "integration" else body.role,
+                      body.revision, token_hash(token), body.host, now, now))
+        value.state, value.retry_at = (value.state if body.phase == "integration" else "running"), None
         store.save_work(conn, project_id, intent_id, value)
         conn.execute("UPDATE intents SET worker=?,last_heartbeat_at=? WHERE project_id=? AND id=?",
                      (body.worker, now, project_id, intent_id))
@@ -236,7 +252,7 @@ def stop(project_id: str):
         return {"state": "stopping"}
 
 
-@router.post("/runs/{run_id}/operations", dependencies=[Depends(require_worker)])
+@router.post("/runs/{run_id}/operations")
 def reserve_operation(project_id: str, run_id: str, body: OperationRequest):
     with get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
@@ -258,7 +274,7 @@ def reserve_operation(project_id: str, run_id: str, body: OperationRequest):
         return {"key": body.key, "state": "unknown", "execute": True}
 
 
-@router.put("/runs/{run_id}/operations/{key}", dependencies=[Depends(require_worker)])
+@router.put("/runs/{run_id}/operations/{key}")
 def reconcile_operation(project_id: str, run_id: str, key: str, body: OperationResult):
     with get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")

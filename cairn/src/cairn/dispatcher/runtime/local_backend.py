@@ -48,6 +48,8 @@ class LocalBackend:
         kill_after_seconds: int = 5,
     ) -> LocalProcess:
         merged_env = {**os.environ, **(env or {})}
+        for key in ("CAIRN_OPERATOR_TOKEN", "CAIRN_WORKER_TOKEN"):
+            merged_env.pop(key, None)
         return LocalProcess(
             command,
             cwd=container_name,

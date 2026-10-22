@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from cairn.dispatcher.config import WorkerConfig
 from cairn.dispatcher.workers.base import DriverResult, SeedSessionDriver
 from cairn.dispatcher.workers.health import HealthResult, http_ping, proxies_from_env
@@ -44,6 +46,7 @@ class ClaudeCodeDriver(SeedSessionDriver):
                 session,
                 "--dangerously-skip-permissions",
                 "-p",
+                *(["--output-format", "json"] if worker.roles else []),
                 "--",
                 prompt,
             ],
@@ -57,6 +60,26 @@ class ClaudeCodeDriver(SeedSessionDriver):
             session,
             "--dangerously-skip-permissions",
             "-p",
+            *(["--output-format", "json"] if worker.roles else []),
             "--",
             prompt,
         ]
+
+
+    def extract_session(self, session: str | None, stdout: str, stderr: str) -> str | None:
+        try:
+            value = json.loads(stdout)
+        except ValueError:
+            return session
+        return value.get("session_id", session) if isinstance(value, dict) else session
+
+    def extract_response_text(self, stdout: str, stderr: str) -> str:
+        try:
+            value = json.loads(stdout)
+        except ValueError:
+            return stdout
+        if isinstance(value, dict) and value.get("type") == "result":
+            if value.get("is_error"):
+                raise ValueError("Claude Code run reported an error: " + str(value.get("result", value.get("errors", "unknown"))))
+            return value.get("result", "")
+        return stdout
