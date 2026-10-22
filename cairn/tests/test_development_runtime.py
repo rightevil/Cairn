@@ -55,6 +55,19 @@ def test_checks_record_real_failure_instead_of_accepting_worker_claim(repository
     assert Path(evidence[0].path).is_file()
 
 
+def test_wrapper_refuses_to_commit_if_worker_switches_its_owned_branch(repository, tmp_path):
+    manager = GitWorkspace(DevelopmentProject(repository=str(repository), design="Build application"), tmp_path / "data", "proj_001")
+    owned = manager.feature("i001", WorkPackage(revision=1))
+    path = Path(owned["worktree"])
+    git(path, "switch", "-c", "unexpected")
+    (path / "README.md").write_text("keep these uncommitted changes")
+    before = git(path, "rev-parse", "HEAD")
+    with pytest.raises(GitError, match="changed the owned feature branch"):
+        manager.commit_implementation(path, "i001")
+    assert git(path, "rev-parse", "HEAD") == before
+    assert (path / "README.md").read_text() == "keep these uncommitted changes"
+
+
 def test_successful_check_cannot_change_the_code_it_verifies(repository, tmp_path):
     manager = GitWorkspace(DevelopmentProject(repository=str(repository), design="Build application"), tmp_path / "data", "proj_001")
     path = manager.snapshot("review")

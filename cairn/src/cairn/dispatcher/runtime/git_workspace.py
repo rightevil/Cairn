@@ -114,6 +114,9 @@ class GitWorkspace:
         # Never commit from the user's integration checkout, only our owned feature worktree.
         if self.directory / "worktrees" / intent_id != path:
             raise GitError("Cannot commit outside the owned feature worktree")
+        branch = self.record(intent_id).get("branch")
+        if not branch or git(path, "symbolic-ref", "--quiet", "--short", "HEAD") != branch:
+            raise GitError("Worker changed the owned feature branch; preserving the checkout without committing")
         if Path(git(path, "rev-parse", "--git-path", "rebase-merge")).exists():
             raise GitError("Worker must finish or resolve the pending rebase before implementation can complete")
         git(path, "add", "--all")
