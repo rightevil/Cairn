@@ -384,8 +384,9 @@ def reserve_operation(project_id: str, run_id: str, body: OperationRequest):
         conn.execute("BEGIN IMMEDIATE")
         row = live_run(conn, project_id, run_id, body.token)
         store.project(conn, project_id, active=True)
-        if affected(conn, project_id, row["intent_id"], row["revision"]):
-            raise HTTPException(409, "New directive requires a checkpoint")
+        value = store.work(conn, project_id, row["intent_id"])
+        if row["cancel_requested"] or value.result.get("pending_design") or value.state == "superseded" or affected(conn, project_id, row["intent_id"], row["revision"]):
+            raise HTTPException(409, "Stopped or revised work requires a checkpoint before another external action")
         old = conn.execute("SELECT * FROM operations WHERE project_id=? AND key=?", (project_id, body.key)).fetchone()
         if old:
             if old["request"] != store.dump(body.request) or old["kind"] != body.kind:
@@ -408,6 +409,10 @@ def reconcile_operation(project_id: str, run_id: str, key: str, body: OperationR
         row = conn.execute("SELECT * FROM operations WHERE project_id=? AND key=?", (project_id, key)).fetchone()
         if row is None:
             raise HTTPException(404, "Reserve an operation before recording it")
+        if row["run_id"] != run_id and body.state == "absent" and conn.execute(
+            "SELECT 1 FROM runs WHERE id=? AND state='running'", (row["run_id"],)
+        ).fetchone():
+            raise HTTPException(409, "Another live run still owns the uncertain external action")
         if row["state"] == "done" and body.state != "done":
             raise HTTPException(409, "A completed operation cannot be reset for replay")
         if row["state"] == "done" and row["resource_id"] and body.resource_id != row["resource_id"]:

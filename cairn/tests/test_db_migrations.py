@@ -68,3 +68,24 @@ def test_configure_maps_disabled_bootstrap_mode_to_false(tmp_path, monkeypatch) 
         ("proj_001", 0),
         ("proj_002", 1),
     ]
+
+
+def test_development_migration_is_repeatable_and_keeps_the_legacy_graph(tmp_path, monkeypatch):
+    from cairn.server.development_store import migrate
+    path = tmp_path / "legacy-graph.db"
+    with sqlite3.connect(path) as conn:
+        conn.executescript(db.SCHEMA)
+        conn.execute("INSERT INTO projects(id,title,created_at) VALUES('proj_001','Keep project','2026-01-01')")
+        conn.execute("INSERT INTO facts VALUES('origin','proj_001','Keep original fact')")
+        conn.execute("INSERT INTO intents(id,project_id,description,creator,created_at) VALUES('i001','proj_001','Keep intent','worker','2026-01-01')")
+        conn.execute("INSERT INTO intent_sources VALUES('i001','proj_001','origin')")
+        conn.execute("INSERT INTO hints VALUES('h001','proj_001','Keep hint','user','2026-01-01')")
+    monkeypatch.setattr(db, "_db_path", None)
+    db.configure(path)
+    with db.get_conn() as conn:
+        migrate(conn)
+        assert conn.execute("SELECT description FROM facts").fetchone()[0] == "Keep original fact"
+        assert conn.execute("SELECT description,work FROM intents").fetchone()[:] == ("Keep intent", None)
+        assert conn.execute("SELECT content,control FROM hints").fetchone()[:] == ("Keep hint", None)
+        assert conn.execute("SELECT count(*) FROM intent_sources").fetchone()[0] == 1
+        assert {r["name"] for r in conn.execute("PRAGMA table_info(runs)")} >= {"streams", "cancel_requested", "process_identity"}

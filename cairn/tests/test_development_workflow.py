@@ -188,6 +188,7 @@ def test_approved_architecture_is_durable_but_unreviewed_plan_is_not(http, tmp_p
     assert http.get(f"/projects/{project}").json()["project"]["development"]["architecture"] == ""
     review = next(i for i, w in works(http, project).items() if w["role"] == "architect")
     finish(http, project, review, {"kind": "review", "verdict": "approve", "summary": "Design fits"}, "architect")
+    db._db_path = None
     db.configure(tmp_path / "cairn.db")
     config = http.get(f"/projects/{project}").json()["project"]["development"]
     assert config["architecture"] == candidate["architecture"] and config["design_revision"] == 2
@@ -287,3 +288,17 @@ def test_repeated_review_disagreement_escalates_instead_of_looping_forever(http,
         subject = store.work(conn, project, implementation)
         assert subject.state == "reviewing" and subject.review_rounds == 2
     assert len([w for w in works(http, project).values() if w["purpose"] == "arbitration"]) == 1
+
+
+def test_useful_suggestion_is_accepted_then_applied_by_a_reviewed_plan(http, tmp_path):
+    project, planner = create(http, tmp_path)
+    hint = http.post(f"/projects/{project}/development/controls", headers=OPERATOR,
+                     json={"content": "Make API errors actionable for first-time users"}).json()
+    reviewer = next(i for i, w in works(http, project).items() if w["purpose"] == "suggestion")
+    finish(http, project, reviewer, {"kind": "review", "verdict": "approve", "summary": "Fits the agreed first-use acceptance"}, "architect")
+    assert http.get(f"/projects/{project}").json()["hints"][0]["control"]["state"] == "accepted"
+    candidate = {**plan(), "addressed_controls": [hint["id"]]}
+    finish(http, project, planner, candidate, "planner")
+    reviewer = next(i for i, w in works(http, project).items() if w["role"] == "architect" and w["purpose"] == "plan")
+    finish(http, project, reviewer, {"kind": "review", "verdict": "approve", "summary": "Suggestion is covered by the API acceptance"}, "architect")
+    assert http.get(f"/projects/{project}").json()["hints"][0]["control"]["state"] == "applied"

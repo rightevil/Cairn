@@ -247,3 +247,8 @@ print(json.dumps({"type":"result","session_id":"session-"+os.environ["CAIRN_RUN_
     assert implementation.work.merge_commit
     assert implementation.work.pr_url.endswith("/pull/1")
     assert current.project.development.state == "completed"
+    # A lost merge receipt must reconcile the existing PR, not create or merge it again.
+    manager = GitWorkspace(current.project.development, tmp_path / "data", project)
+    reconciled, evidence = manager.integrate(implementation.id, implementation.work, tmp_path / "reconcile-run", TaskCancellation())
+    assert reconciled["checks_passed"] and reconciled["merge_commit"] == implementation.work.merge_commit
+    assert evidence and transport.creates == transport.merges == 1

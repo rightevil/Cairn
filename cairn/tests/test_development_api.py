@@ -181,6 +181,7 @@ def test_stop_then_resume_does_not_revive_the_old_attempt(http, tmp_path):
     http.put(f"/projects/{project}/status", headers=OPERATOR, json={"status": "active"}).raise_for_status()
     url = f"/projects/{project}/development/runs/{run['id']}"
     assert http.post(url + "/heartbeat", headers=WORKER, json={"token": run["token"]}).json()["cancel"] is True
+    assert http.post(url + "/operations", json={"token": run["token"], "key": "new-job", "kind": "scheduler", "request": {}}).status_code == 409
     result = http.post(url + "/finish", headers=WORKER, json={"token": run["token"], "outcome": "success"})
     assert result.json()["state"] == "cancelled"
 
@@ -217,3 +218,19 @@ def test_declared_shared_resources_serialize_across_projects_until_run_ends(http
     http.post(f"/projects/{project}/development/runs/{run['id']}/finish", headers=WORKER,
               json={"token": run["token"], "outcome": "cancelled"}).raise_for_status()
     assert claim(http, other, second, role="implementer").status_code == 200
+
+
+def test_uncertain_action_cannot_be_replayed_while_its_original_owner_is_live(http, tmp_path):
+    project, planner = create(http, tmp_path)
+    first = claim(http, project, planner).json()
+    with db.get_conn() as conn:
+        second_intent = store.add_intent(conn, project, "Another feature", WorkPackage(revision=1))
+    second = claim(http, project, second_intent, role="implementer").json()
+    prefix = f"/projects/{project}/development/runs"
+    payload = {"key": "scheduler:watch", "kind": "create", "request": {"name": "watch"}}
+    assert http.post(f"{prefix}/{first['id']}/operations", json={**payload, "token": first["token"]}).json()["execute"]
+    assert not http.post(f"{prefix}/{second['id']}/operations", json={**payload, "token": second["token"]}).json()["execute"]
+    record = {"token": second["token"], "state": "absent", "evidence": "Service has not shown the pending create yet"}
+    assert http.put(f"{prefix}/{second['id']}/operations/scheduler:watch", json=record).status_code == 409
+    http.post(f"{prefix}/{first['id']}/finish", headers=WORKER, json={"token": first["token"], "outcome": "cancelled"}).raise_for_status()
+    assert http.put(f"{prefix}/{second['id']}/operations/scheduler:watch", json=record).status_code == 200
