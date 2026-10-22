@@ -2,6 +2,8 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response
 from datetime import datetime
 import yaml
+import json
+import json
 
 from cairn.server.db import get_conn
 from cairn.server.services import expire_reason_leases, expire_workers, get_project_or_404
@@ -28,7 +30,7 @@ def _load_project_data(conn, project_id: str):
         "SELECT id, description FROM facts WHERE project_id = ?", (project_id,)
     ).fetchall()
     hints = conn.execute(
-        "SELECT content, creator, created_at FROM hints WHERE project_id = ? ORDER BY created_at",
+        "SELECT id, content, creator, created_at, control FROM hints WHERE project_id = ? ORDER BY created_at",
         (project_id,),
     ).fetchall()
     intents = conn.execute(
@@ -67,10 +69,20 @@ def _export_yaml(conn, project_id: str) -> str:
         }
     }
 
+    if proj["development"]:
+        data["project"]["development"] = json.loads(proj["development"])
+
+    if proj["development"]:
+        data["project"]["development"] = json.loads(proj["development"])
+
     if hints:
         data["hints"] = [
             {
+                "id": h["id"],
+                "id": h["id"],
                 "content": h["content"],
+                **({"control": json.loads(h["control"])} if h["control"] else {}),
+                **({"control": json.loads(h["control"])} if h["control"] else {}),
                 "creator": h["creator"],
                 "created_at": format_export_timestamp(h["created_at"]),
             }
@@ -82,6 +94,8 @@ def _export_yaml(conn, project_id: str) -> str:
     intent_list = []
     for i in intents:
         entry: dict = {
+            "id": i["id"],
+            **({"work": json.loads(i["work"])} if i["work"] else {}),
             "from": sources_by_intent.get(i["id"], []),
             "to": i["to_fact_id"],
             "description": i["description"],

@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
+from cairn.server.development_models import Control, DevelopmentProject, WorkPackage
 
 
 class Settings(BaseModel):
@@ -25,6 +26,7 @@ class Intent(BaseModel):
     last_heartbeat_at: str | None = None
     created_at: str
     concluded_at: str | None = None
+    work: WorkPackage | None = None
 
     model_config = {"populate_by_name": True}
 
@@ -34,6 +36,7 @@ class Hint(BaseModel):
     content: str
     creator: str
     created_at: str
+    control: Control | None = None
 
 
 class ProjectReason(BaseModel):
@@ -50,6 +53,7 @@ class ProjectMeta(BaseModel):
     bootstrap_enabled: bool
     created_at: str
     reason: ProjectReason | None = None
+    development: DevelopmentProject | None = None
 
 
 class ProjectSummary(ProjectMeta):
@@ -86,6 +90,7 @@ class CreateProjectRequest(BaseModel):
     goal: str
     bootstrap_enabled: bool = True
     hints: list[CreateHintInline] | None = None
+    development: DevelopmentProject | None = None
 
     @field_validator("title", "origin", "goal")
     @classmethod

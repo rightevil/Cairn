@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import json
 from datetime import datetime, timezone
 
 from fastapi import HTTPException
@@ -56,6 +57,8 @@ def get_project_or_404(conn: sqlite3.Connection, project_id: str) -> sqlite3.Row
 
 
 def check_project_active(conn: sqlite3.Connection, project_id: str) -> sqlite3.Row:
+    from cairn.server.development_store import block_legacy_write
+    block_legacy_write(conn, project_id)
     row = get_project_or_404(conn, project_id)
     if row["status"] != "active":
         raise HTTPException(403, f"Project is {row['status']}")
@@ -63,6 +66,8 @@ def check_project_active(conn: sqlite3.Connection, project_id: str) -> sqlite3.R
 
 
 def check_project_hint_writable(conn: sqlite3.Connection, project_id: str) -> sqlite3.Row:
+    from cairn.server.development_store import block_legacy_write
+    block_legacy_write(conn, project_id)
     row = get_project_or_404(conn, project_id)
     if row["status"] not in ("active", "stopped", "completed"):
         raise HTTPException(403, f"Project is {row['status']}")
@@ -70,6 +75,8 @@ def check_project_hint_writable(conn: sqlite3.Connection, project_id: str) -> sq
 
 
 def check_project_completed(conn: sqlite3.Connection, project_id: str) -> sqlite3.Row:
+    from cairn.server.development_store import block_legacy_write
+    block_legacy_write(conn, project_id)
     row = get_project_or_404(conn, project_id)
     if row["status"] != "completed":
         raise HTTPException(403, f"Project is {row['status']}")
@@ -162,6 +169,7 @@ def intent_to_model(conn: sqlite3.Connection, row: sqlite3.Row, project_id: str)
         last_heartbeat_at=row["last_heartbeat_at"],
         created_at=row["created_at"],
         concluded_at=row["concluded_at"],
+        work=json.loads(row["work"]) if "work" in row.keys() and row["work"] else None,
     )
 
 
@@ -202,6 +210,7 @@ def project_meta_from_row(row: sqlite3.Row) -> ProjectMeta:
         bootstrap_enabled=bool(row["bootstrap_enabled"]),
         created_at=row["created_at"],
         reason=project_reason_from_row(row),
+        development=json.loads(row["development"]) if "development" in row.keys() and row["development"] else None,
     )
 
 

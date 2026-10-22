@@ -1,4 +1,7 @@
-from fastapi import APIRouter, HTTPException
+import json
+
+from fastapi import APIRouter, HTTPException, Request
+from cairn.server.access import require_operator
 
 from cairn.server.db import get_conn
 from cairn.server.models import (
@@ -64,6 +67,7 @@ def list_projects():
                 bootstrap_enabled=bool(row["bootstrap_enabled"]),
                 created_at=row["created_at"],
                 reason=project_reason_from_row(row),
+                development=json.loads(row["development"]) if row["development"] else None,
                 fact_count=row["fact_count"],
                 intent_count=row["intent_count"],
                 working_intent_count=row["working_intent_count"],
@@ -75,7 +79,9 @@ def list_projects():
 
 
 @router.post("/projects", response_model=ProjectDetail, status_code=201)
-def create_project(body: CreateProjectRequest):
+def create_project(body: CreateProjectRequest, request: Request):
+    if body.development is not None:
+        require_operator(request)
     with get_conn() as conn:
         pid = next_project_id(conn)
         now = utcnow()
@@ -93,9 +99,19 @@ def create_project(body: CreateProjectRequest):
             ("goal", pid, body.goal),
         )
 
+        if body.development is not None:
+            from cairn.server.routers.development import initialize
+            initialize(conn, pid, body.development)
+
         hints = []
         if body.hints:
             for h in body.hints:
+                if body.development is not None:
+                    from cairn.server.routers.development import add_control
+                    from cairn.server.development_models import ControlRequest
+                    added = add_control(conn, pid, ControlRequest(content=h.content))
+                    hints.append(Hint(id=added["id"], content=h.content, creator="operator", created_at=now, control=added["control"]))
+                    continue
                 hid = next_hint_id(conn, pid)
                 conn.execute(
                     "INSERT INTO hints (id, project_id, content, creator, created_at) VALUES (?, ?, ?, ?, ?)",
@@ -104,19 +120,12 @@ def create_project(body: CreateProjectRequest):
                 hints.append(Hint(id=hid, content=h.content, creator=h.creator, created_at=now))
 
         return ProjectDetail(
-            project=ProjectMeta(
-                id=pid,
-                title=body.title,
-                status="active",
-                bootstrap_enabled=body.bootstrap_enabled,
-                created_at=now,
-                reason=None,
-            ),
+            project=project_meta_from_row(get_project_or_404(conn, pid)),
             facts=[
                 Fact(id="origin", description=body.origin),
                 Fact(id="goal", description=body.goal),
             ],
-            intents=[],
+            intents=build_intents(conn, pid),
             hints=hints,
         )
 
@@ -140,19 +149,25 @@ def get_project(project_id: str):
             project=project_meta_from_row(row),
             facts=[Fact(**dict(f)) for f in facts],
             intents=build_intents(conn, project_id),
-            hints=[Hint(**dict(h)) for h in hints],
+            hints=[Hint(**{**dict(h), "control": json.loads(h["control"]) if h["control"] else None}) for h in hints],
         )
 
 
 @router.delete("/projects/{project_id}", status_code=204)
-def delete_project(project_id: str):
+def delete_project(project_id: str, request: Request):
+    with get_conn() as auth_conn:
+        if get_project_or_404(auth_conn, project_id)["development"]:
+            require_operator(request)
     with get_conn() as conn:
         get_project_or_404(conn, project_id)
         conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
 
 
 @router.put("/projects/{project_id}/title", response_model=ProjectMeta)
-def update_project_title(project_id: str, body: UpdateProjectTitleRequest):
+def update_project_title(project_id: str, body: UpdateProjectTitleRequest, request: Request):
+    with get_conn() as auth_conn:
+        if get_project_or_404(auth_conn, project_id)["development"]:
+            require_operator(request)
     with get_conn() as conn:
         get_project_or_404(conn, project_id)
         conn.execute(
@@ -164,7 +179,10 @@ def update_project_title(project_id: str, body: UpdateProjectTitleRequest):
 
 
 @router.put("/projects/{project_id}/status", response_model=ProjectMeta)
-def update_project_status(project_id: str, body: UpdateProjectStatusRequest):
+def update_project_status(project_id: str, body: UpdateProjectStatusRequest, request: Request):
+    with get_conn() as auth_conn:
+        if get_project_or_404(auth_conn, project_id)["development"]:
+            require_operator(request)
     with get_conn() as conn:
         expire_reason_leases(conn, project_id)
         row = get_project_or_404(conn, project_id)

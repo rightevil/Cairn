@@ -91,6 +91,8 @@ def configure(path: Path) -> None:
     with get_conn() as conn:
         conn.executescript(SCHEMA)
         _ensure_project_columns(conn)
+        from cairn.server.development_store import migrate
+        migrate(conn)
 
 
 def _ensure_project_columns(conn: sqlite3.Connection) -> None:
