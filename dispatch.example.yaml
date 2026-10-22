@@ -1,88 +1,71 @@
-# Cairn server API endpoint.
-server: "http://cairn-server:8000"
+# Local execution example — workers run directly on the dispatcher host and reuse the
+# machine's already-configured claude / codex / pi CLIs. No API keys, base URLs or models
+# are configured here; each CLI uses its own host configuration and credentials.
+#
+# Usage:
+#   cp dispatch.example.yaml dispatch.yaml
+#   uv run --project cairn cairn serve                       # in one shell
+#   uv run --project cairn cairn dispatch --config dispatch.yaml
+#
+# Notes:
+# - Do NOT run the dispatcher via docker-compose in local mode: it must run on the host
+#   where the CLIs are installed, logged in, and on PATH. The server may still run anywhere.
+# - Local mode runs the agents with your user's permissions and no sandbox. Only use it in
+#   environments you are authorized to operate in.
 
-# Shared environment variables merged into every worker.
-common_env:
-  TSEC_SERVER_HOST: "<SERVER_HOST>:8000"
-  TSEC_AGENT_TOKEN: "xxx"
+server: "http://127.0.0.1:8000"
 
 runtime:
-  # Scheduler tick interval in seconds.
+  execution: local            # run workers as host processes instead of per-project containers
+  worker_healthcheck: disabled  # no base_url to probe; startup instead checks the CLIs are on PATH
+  max_workers: 3              # all workers share this host — size to the machine
+  max_running_projects: 2
+  max_project_workers: 2
   interval: 3
-  # Global concurrency cap across all workers and all projects.
-  max_workers: 8
-  # Maximum number of projects that may be actively scheduled at the same time.
-  max_running_projects: 3
-  # Per-project worker cap. Prevents one project from monopolizing the whole dispatcher.
-  max_project_workers: 4
-  # Timeout for each enabled worker healthcheck.
-  healthcheck_timeout: 20
-  # "startup_and_task" checks at dispatcher startup and before every task.
-  # "startup_only" checks only at startup. "disabled" skips automatic worker checks.
-  worker_healthcheck: "startup_only"
-  # Prompt set loaded from cairn/src/cairn/dispatcher/prompts/.
+  healthcheck_timeout: 15
   prompt_group: "default"
 
 tasks:
   bootstrap:
-    # Main execution timeout for the initial direct solve attempt.
-    timeout: 300
-    # Time budget for conclude fallback after the main phase times out or returns unusable output.
-    conclude_timeout: 90
+    timeout: 120
+    conclude_timeout: 30
   reason:
-    # Reason decides whether the goal is met and whether new intents should be proposed.
-    timeout: 300
-    # Hard cap on how many new intents one reason step may create.
-    max_intents: 2
+    timeout: 45
   explore:
-    # Main execution timeout for exploring a claimed intent.
-    timeout: 300
-    # Time budget for conclude fallback used to summarize confirmed findings from the same session.
-    conclude_timeout: 90
+    timeout: 600
+    conclude_timeout: 120
 
-container:
-  # Base worker container. The dispatcher execs agent commands inside one container per project.
-  image: "ghcr.io/oritera/cairn-worker-container:latest"
-  network_mode: "host"
-  # "stop" keeps finished containers for inspection; "remove" is cleaner but loses post-run state.
-  completed_action: "stop"
-  # Add Linux capabilities only when a task truly needs them, such as packet crafting or network admin actions.
-  # cap_add:
-  #   - "NET_RAW"
-  #   - "NET_ADMIN"
+# Optional. If omitted: workspace_root defaults to the dispatcher's current directory,
+# completed_action defaults to keep. Each project gets an isolated <workspace_root>/<project_id>/.
+local:
+  # workspace_root: "/data/cairn-runs"
+  completed_action: keep       # keep | remove
 
+# Extra environment variables for every local worker process. These are merged over the
+# dispatcher's own environment ({**os.environ, **common_env}), so use it for things the
+# CLIs need at runtime, e.g. an outbound proxy. (Alternatively just `export` them in the
+# shell that starts the dispatcher — local workers inherit that environment.)
+# common_env:
+#   https_proxy: "http://127.0.0.1:7897"
+#   http_proxy: "http://127.0.0.1:7897"
+#   all_proxy: "http://127.0.0.1:7897"
 
+# No API keys needed — the host CLIs are used as-is. Per-worker `env:` overrides common_env.
 workers:
-  # Worker priority is ascending: lower numbers are preferred first.
-  # max_running is per-worker concurrency. Slower backends such as Pi usually benefit from lower values.
-  - name: "claudecode_deepseek-v4-pro"
+  - name: "local-claude"
     type: "claudecode"
     task_types: [bootstrap, reason, explore]
-    max_running: 2
+    max_running: 1
     priority: 0
-    env:
-      ANTHROPIC_MODEL: "deepseek-v4-pro"
-      ANTHROPIC_BASE_URL: "https://api.deepseek.com/anthropic"
-      ANTHROPIC_AUTH_TOKEN: "sk-xxx"
 
-  # - name: "codex_qwen3.6-plus"
+  # - name: "local-codex"
   #   type: "codex"
-  #   task_types: [bootstrap,reason,explore]
-  #   max_running: 2
-  #   priority: 0
-  #   env:
-  #     CODEX_MODEL: "qwen3.6-plus"
-  #     CODEX_BASE_URL: "https://dashscope.aliyuncs.com/compatible-mode/v1"
-  #     OPENAI_API_KEY: "sk-xxx"
+  #   task_types: [explore]
+  #   max_running: 1
+  #   priority: 1
 
-  # - name: "pi_qwen3.6-plus"
+  # - name: "local-pi"
   #   type: "pi"
-  #   task_types: [bootstrap,reason,explore]
-  #   max_running: 2
-  #   priority: 0
-  #   env:
-  #     PI_MODEL: "qwen3.6-plus"
-  #     PI_BASE_URL: "https://dashscope.aliyuncs.com/compatible-mode/v1"
-  #     PI_API_KEY: "sk-xxx"
-  #     PI_PROVIDER_API: "openai-completions"
-  #     PI_MODEL_CONTEXT_WINDOW: "262144"
+  #   task_types: [reason]
+  #   max_running: 1
+  #   priority: 2

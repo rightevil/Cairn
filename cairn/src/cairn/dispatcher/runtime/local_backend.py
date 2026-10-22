@@ -24,7 +24,8 @@ class LocalBackend:
     def __init__(self, config: LocalConfig):
         self._config = config
         root = config.workspace_root
-        self._root = Path(root).expanduser() if root else Path.cwd()
+        self._root = (Path(root).expanduser() if root else Path.cwd()).resolve()
+        self.snapshot_root = str(self._root / ".cairn" / "snapshots")
 
     def close(self) -> None:
         return None

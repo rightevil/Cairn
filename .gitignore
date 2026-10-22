@@ -4,3 +4,13 @@ __pycache__/
 .playwright-cli/
 datas/
 dispatch.yaml
+.planning/
+.venv/
+.pytest_cache/
+/docs/
+/scripts/
+*.ps1
+/AGENTS.md
+/dispatch*.yaml
+!/dispatch.example.yaml
+/dispatch*.yml

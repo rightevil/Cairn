@@ -183,7 +183,7 @@ uv run --project cairn cairn dispatch --config dispatch.yaml --startup-healthche
 Instead of one container per project, workers can run directly on the dispatcher host, reusing the machine's already-configured `claude` / `codex` / `pi` CLIs — no Docker, and no API keys in the config.
 
 ```bash
-cp dispatch.local.example.yaml dispatch.yaml
+cp dispatch.example.yaml dispatch.yaml
 
 # Start the server
 uv run --project cairn cairn serve
@@ -192,7 +192,7 @@ uv run --project cairn cairn serve
 uv run --project cairn cairn dispatch --config dispatch.yaml
 ```
 
-Local mode is selected by `runtime.execution: local` (see `dispatch.local.example.yaml`). On startup the dispatcher checks each configured worker CLI is installed and runnable, and reminds you they must already be logged in. Each project gets an isolated working directory under `local.workspace_root` (default: the dispatcher's current directory). Run the dispatcher directly on the host — not inside Docker — since the agents run with your user's permissions and no sandbox.
+Local mode is selected by `runtime.execution: local` (see `dispatch.example.yaml`). On startup the dispatcher checks each configured worker CLI is installed and runnable, and reminds you they must already be logged in. Each project gets an isolated working directory under `local.workspace_root` (default: the dispatcher's current directory). Run the dispatcher directly on the host — not inside Docker — since the agents run with your user's permissions and no sandbox.
 
 ### Tests
 

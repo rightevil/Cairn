@@ -46,19 +46,38 @@ class LocalProcess:
         self._timed_out = False
         self._cancel_reason: str | None = None
         self._kill_lock = threading.Lock()
+        self._job = None
 
     def start(self) -> None:
-        self._process = subprocess.Popen(
-            self.command,
-            cwd=self._cwd,
-            env=self.env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            start_new_session=True,
-        )
+        if os.name == "nt":
+            from cairn.dispatcher.runtime.windows_job import WindowsJob
+            self._job = WindowsJob()
+        flags = (subprocess.CREATE_NO_WINDOW | 0x00000004) if os.name == "nt" else 0
+        try:
+            self._process = subprocess.Popen(
+                self.command,
+                cwd=self._cwd,
+                env=self.env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                start_new_session=os.name != "nt",
+                creationflags=flags,
+            )
+        except Exception:
+            if self._job is not None:
+                self._job.close()
+            raise
+        if self._job is not None:
+            try:
+                self._job.assign_and_resume(self._process.pid)
+            except Exception:
+                self._process.kill()
+                self._process.wait()
+                self._job.close()
+                raise
         self._stdout_thread = threading.Thread(
             target=self._drain, args=(self._process.stdout, self._stdout_chunks), daemon=True
         )
@@ -78,6 +97,9 @@ class LocalProcess:
             self._terminate()
         with suppress(subprocess.TimeoutExpired):
             self._process.wait(timeout=FORCE_KILL_REAP_TIMEOUT_SECONDS)
+        if self._job is not None:
+            with self._kill_lock:
+                self._job.close()
         if self._stdout_thread is not None:
             self._stdout_thread.join(timeout=STREAM_JOIN_TIMEOUT_SECONDS)
         if self._stderr_thread is not None:
@@ -104,6 +126,9 @@ class LocalProcess:
 
     def _terminate(self) -> None:
         with self._kill_lock:
+            if self._job is not None:
+                self._job.terminate()
+                return
             process = self._process
             if process is None or process.poll() is not None:
                 return

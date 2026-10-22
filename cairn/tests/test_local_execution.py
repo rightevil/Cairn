@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import os
+import sys
+import json
+import subprocess
 import time
 from pathlib import Path
 
@@ -28,7 +31,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 def test_local_process_captures_stdout_and_exit_code() -> None:
     process = LocalProcess(
-        ["python3", "-c", "import sys; print('hello'); sys.exit(3)"],
+        [sys.executable, "-c", "import sys; print('hello'); sys.exit(3)"],
         cwd=os.getcwd(),
         env=dict(os.environ),
         timeout_seconds=10,
@@ -43,7 +46,7 @@ def test_local_process_captures_stdout_and_exit_code() -> None:
 
 def test_local_process_inherits_cwd(tmp_path: Path) -> None:
     process = LocalProcess(
-        ["python3", "-c", "import os; print(os.getcwd())"],
+        [sys.executable, "-c", "import os; print(os.getcwd())"],
         cwd=str(tmp_path),
         env=dict(os.environ),
         timeout_seconds=10,
@@ -56,7 +59,7 @@ def test_local_process_inherits_cwd(tmp_path: Path) -> None:
 
 def test_local_process_times_out_and_kills_within_grace() -> None:
     process = LocalProcess(
-        ["sh", "-c", "sleep 30"],
+        [sys.executable, "-c", "import time; time.sleep(30)"],
         cwd=os.getcwd(),
         env=dict(os.environ),
         timeout_seconds=1,
@@ -73,9 +76,11 @@ def test_local_process_times_out_and_kills_within_grace() -> None:
 
 def test_local_process_kill_terminates_child_process_group(tmp_path: Path) -> None:
     pid_file = tmp_path / "child.pid"
-    script = f"sleep 30 & echo $! > {pid_file}; wait"
+    script = ("import subprocess,sys,time; from pathlib import Path; "
+              "child=subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)']); "
+              f"Path({str(pid_file)!r}).write_text(str(child.pid)); time.sleep(30)")
     process = LocalProcess(
-        ["sh", "-c", script],
+        [sys.executable, "-c", script],
         cwd=str(tmp_path),
         env=dict(os.environ),
         timeout_seconds=1,
@@ -89,7 +94,7 @@ def test_local_process_kill_terminates_child_process_group(tmp_path: Path) -> No
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
         try:
-            os.kill(child_pid, 0)
+            _assert_process_exists(child_pid)
         except ProcessLookupError:
             break
         time.sleep(0.1)
@@ -99,7 +104,7 @@ def test_local_process_kill_terminates_child_process_group(tmp_path: Path) -> No
 
 def test_local_process_cancel_records_reason() -> None:
     process = LocalProcess(
-        ["sh", "-c", "sleep 30"],
+        [sys.executable, "-c", "import time; time.sleep(30)"],
         cwd=os.getcwd(),
         env=dict(os.environ),
         timeout_seconds=30,
@@ -133,7 +138,7 @@ def test_local_backend_merges_host_env_with_worker_env(tmp_path: Path, monkeypat
     process = backend.build_exec_process(
         handle,
         {"CAIRN_WORKER_VAR": "worker"},
-        ["sh", "-c", 'printf "%s-%s" "$CAIRN_HOST_VAR" "$CAIRN_WORKER_VAR"'],
+        [sys.executable, "-c", "import os; print(os.environ['CAIRN_HOST_VAR']+'-'+os.environ['CAIRN_WORKER_VAR'],end='')"],
         timeout_seconds=10,
     )
     process.start()
@@ -162,7 +167,7 @@ def test_local_common_env_reaches_worker_subprocess(tmp_path: Path, monkeypatch)
     process = backend.build_exec_process(
         handle,
         dict(worker.env),
-        ["sh", "-c", 'printf "%s|%s|%s" "$https_proxy" "$http_proxy" "$all_proxy"'],
+        [sys.executable, "-c", "import os; print('|'.join(os.environ[k] for k in ['https_proxy','http_proxy','all_proxy']),end='')"],
         timeout_seconds=10,
     )
     process.start()
@@ -273,8 +278,11 @@ def test_container_execution_still_requires_worker_env() -> None:
         DispatchConfig.model_validate(payload)
 
 
-def test_shipped_local_example_config_is_valid() -> None:
-    config = DispatchConfig.load(REPO_ROOT / "dispatch.local.example.yaml")
+def test_shipped_local_example_config_is_valid(monkeypatch) -> None:
+    for key, value in {"MAGPIE_ANTHROPIC_BASE_URL": "http://127.0.0.1:9999", "MAGPIE_API_KEY": "test-only",
+                       "MAGPIE_STRONG_MODEL": "strong-model", "MAGPIE_STANDARD_MODEL": "standard-model"}.items():
+        monkeypatch.setenv(key, value)
+    config = DispatchConfig.load(REPO_ROOT / "dispatch.example.yaml")
 
     assert config.runtime.execution == "local"
     assert config.container is None
@@ -380,12 +388,19 @@ def _local_config_for_worker(name: str, worker_type: str) -> DispatchConfig:
 
 
 def _install_fake_cli(tmp_path: Path, monkeypatch, name: str, body: str) -> None:
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir(exist_ok=True)
-    script = bin_dir / name
-    script.write_text(f"#!/bin/sh\n{body}\n")
-    script.chmod(0o755)
-    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    # Only replace the executable lookup; driver argv and the real subprocess path remain exercised.
+    import shlex
+    output = shlex.split(body)[1]
+    script = tmp_path / (name + ".py")
+    script.write_text("print(" + repr(output) + ")", encoding="utf-8")
+    original = subprocess.Popen
+
+    def launch(command, *args, **kwargs):
+        if command[0] == name:
+            command = [sys.executable, str(script), *command[1:]]
+        return original(command, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", launch)
 
 
 def test_explore_runs_real_local_cli_end_to_end(tmp_path: Path, monkeypatch) -> None:
@@ -397,7 +412,6 @@ def test_explore_runs_real_local_cli_end_to_end(tmp_path: Path, monkeypatch) -> 
         "claude",
         "echo '{\"accepted\":true,\"data\":{\"description\":\"local fake fact\"}}'",
     )
-    monkeypatch.setattr(common, "GRAPH_SNAPSHOT_ROOT", str(tmp_path / "prompts"))
 
     config = _local_config_for_worker("test-worker", "claudecode")
     backend = LocalBackend(LocalConfig(workspace_root=str(tmp_path / "work")))
@@ -419,7 +433,7 @@ def test_explore_runs_real_local_cli_end_to_end(tmp_path: Path, monkeypatch) -> 
     assert outcome == "success"
     assert client.concluded == [("proj_001", "i001", "test-worker", "local fake fact")]
     # graph snapshot was materialised on the host under the patched root
-    snapshot_root = tmp_path / "prompts"
+    snapshot_root = Path(backend.snapshot_root)
     assert any(p.name == "graph.yaml" for p in snapshot_root.rglob("*"))
 
 
@@ -430,7 +444,6 @@ def test_explore_local_cli_rejection_releases_intent(tmp_path: Path, monkeypatch
         "claude",
         "echo '{\"accepted\":false,\"reason\":\"policy_refusal\"}'",
     )
-    monkeypatch.setattr(common, "GRAPH_SNAPSHOT_ROOT", str(tmp_path / "prompts"))
 
     config = _local_config_for_worker("test-worker", "claudecode")
     backend = LocalBackend(LocalConfig(workspace_root=str(tmp_path / "work")))
@@ -452,3 +465,39 @@ def test_explore_local_cli_rejection_releases_intent(tmp_path: Path, monkeypatch
     assert outcome == "rejected"
     assert client.concluded == []
     assert client.released == [("proj_001", "i001", "test-worker")]
+
+
+def _assert_process_exists(pid: int) -> None:
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+        api = ctypes.WinDLL("kernel32", use_last_error=True)
+        api.OpenProcess.restype = wintypes.HANDLE
+        api.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        api.CloseHandle.argtypes = [wintypes.HANDLE]
+        handle = api.OpenProcess(0x1000, False, pid)
+        if not handle:
+            raise ProcessLookupError(pid)
+        try:
+            code = wintypes.DWORD()
+            assert api.GetExitCodeProcess(handle, ctypes.byref(code))
+            if code.value != 259:
+                raise ProcessLookupError(pid)
+        finally:
+            api.CloseHandle(handle)
+    else:
+        os.kill(pid, 0)
+        status = Path(f"/proc/{pid}/stat")
+        if status.exists() and status.read_text().split(") ", 1)[1].startswith("Z"):
+            raise ProcessLookupError(pid)
+
+
+def test_local_snapshot_default_supports_unicode_and_spaces(tmp_path: Path) -> None:
+    backend = LocalBackend(LocalConfig(workspace_root=str(tmp_path / "开发 workspace")))
+    workdir = backend.ensure_running("proj_001")
+    reference = common.write_graph_snapshot_reference(backend, workdir, "facts: []\n", phase="reason")
+    files = list(Path(backend.snapshot_root).rglob("graph.yaml"))
+    assert len(files) == 1
+    assert files[0].is_absolute()
+    assert files[0].read_text(encoding="utf-8") == "facts: []\n"
+    assert str(files[0]).replace("\\", "/") in reference.replace("\\", "/")
