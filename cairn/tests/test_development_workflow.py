@@ -1,4 +1,5 @@
 import json
+import pytest
 
 from cairn.server import db
 from cairn.server import development_store as store
@@ -118,7 +119,7 @@ def test_wait_is_legal_without_inventing_new_work(http, tmp_path):
     data = http.get(f"/projects/{project}").json()
     assert data["project"]["development"]["state"] == "waiting"
     assert len(data["intents"]) == 1
-    assert data["intents"][0]["work"]["retry_at"] is None
+    assert data["intents"][0]["work"]["retry_at"] is not None
 
 
 def test_architecture_gap_is_sent_to_strong_role_while_other_work_remains_ready(http, tmp_path):
@@ -178,3 +179,111 @@ def test_completed_feature_requires_explicit_reviewed_revision_to_reimplement(ht
     values = works(http, project)
     assert values[old]["state"] == "superseded"
     assert len([w for w in values.values() if w["key"] == "api"]) == 2
+
+
+def test_approved_architecture_is_durable_but_unreviewed_plan_is_not(http, tmp_path):
+    project, planner = create(http, tmp_path)
+    candidate = {**plan(), "architecture": "Preserve the database contract; expose a compatibility API", "milestone": "First usable API"}
+    finish(http, project, planner, candidate, "planner")
+    assert http.get(f"/projects/{project}").json()["project"]["development"]["architecture"] == ""
+    review = next(i for i, w in works(http, project).items() if w["role"] == "architect")
+    finish(http, project, review, {"kind": "review", "verdict": "approve", "summary": "Design fits"}, "architect")
+    db.configure(tmp_path / "cairn.db")
+    config = http.get(f"/projects/{project}").json()["project"]["development"]
+    assert config["architecture"] == candidate["architecture"] and config["design_revision"] == 2
+    assert config["milestone"] == candidate["milestone"]
+    assert all(w["design_revision"] == 2 for w in works(http, project).values() if w["role"] == "implementer")
+
+
+def test_live_direction_dispute_waits_for_affected_checkpoint_and_fences_old_review(http, tmp_path):
+    project, planner = create(http, tmp_path)
+    approve_plan(http, project, planner)
+    values = works(http, project)
+    implementation = next(i for i, w in values.items() if w["key"] == "api")
+    unrelated = next(i for i, w in values.items() if w["key"] == "ui")
+    run = claim(http, project, implementation, role="implementer").json()
+    with db.get_conn() as conn:
+        direction = store.add_intent(conn, project, "Direction audit", WorkPackage(role="architect", purpose="direction", revision=1))
+    finish(http, project, direction, {"kind": "review", "verdict": "needs_design", "summary": "API conflicts with the design", "affected": [implementation]}, "architect")
+    url = f"/projects/{project}/development/runs/{run['id']}"
+    assert http.post(url + "/heartbeat", headers=WORKER, json={"token": run["token"]}).json()["checkpoint_requested"] is True
+    assert not any(w["purpose"] == "arbitration" for w in works(http, project).values())
+    http.post(url + "/finish", headers=WORKER, json={"token": run["token"], "outcome": "success", "result": {"output": {"kind": "implemented", "summary": "Saved checkpoint"}}}).raise_for_status()
+    advance(http, project)
+    values = works(http, project)
+    arbitration = next(i for i, w in values.items() if w["purpose"] == "arbitration")
+    assert values[unrelated]["state"] == "ready"
+    with db.get_conn() as conn:
+        obsolete = store.add_intent(conn, project, "Old review", WorkPackage(role="reviewer", purpose="implementation", subject=implementation, subject_run=run["id"], revision=1))
+    finish(http, project, arbitration, {"kind": "decision", "summary": "Use a compatibility endpoint", "architecture": "Compatibility endpoint preserves storage"}, "architect")
+    assert works(http, project)[implementation]["state"] == "ready"
+    assert works(http, project)[obsolete]["state"] == "superseded"
+    assert claim(http, project, obsolete, role="reviewer").status_code == 409
+
+
+def test_replacement_cannot_create_a_cycle_through_existing_work(http, tmp_path):
+    from cairn.server.development_models import DevelopmentOutcome
+    from cairn.server.development_workflow import install_plan
+    project, planner = create(http, tmp_path)
+    approve_plan(http, project, planner)
+    values = works(http, project)
+    api = next(i for i, w in values.items() if w["key"] == "api")
+    with db.get_conn() as conn:
+        prior = store.work(conn, project, api)
+        prior.state = "verified"
+        store.save_work(conn, project, api, prior)
+        candidate = plan()
+        candidate["work"] = [{**candidate["work"][0], "supersedes": api, "dependencies": ["ui"]}]
+        with pytest.raises(ValueError, match="cycle"):
+            install_plan(conn, project, DevelopmentOutcome.model_validate(candidate), 1)
+    assert len(works(http, project)) == 4
+
+
+def test_invalid_extra_checks_are_not_hidden_by_project_checks(http, tmp_path):
+    project, planner = create(http, tmp_path)
+    candidate = plan()
+    candidate["work"][0]["checks"] = [[]]
+    finish(http, project, planner, candidate, "planner")
+    assert "runnable" in works(http, project)[planner]["checkpoint"]
+
+
+def test_user_wait_does_not_busy_retry_and_times_normalize_to_utc(http, tmp_path):
+    from cairn.server.development_models import DevelopmentOutcome
+    project, planner = create(http, tmp_path)
+    finish(http, project, planner, {"kind": "wait", "summary": "Need user product decision", "wait_for": "user"}, "planner")
+    assert works(http, project)[planner]["retry_at"] is None
+    assert DevelopmentOutcome(kind="wait", summary="Service reset", wake_at="2030-01-01T08:00:00+08:00").wake_at == "2030-01-01T00:00:00Z"
+    with pytest.raises(ValueError, match="time zone"):
+        DevelopmentOutcome(kind="wait", summary="Ambiguous", wake_at="2030-01-01T08:00:00")
+
+
+def test_author_session_cannot_approve_its_own_plan(http, tmp_path):
+    project, planner = create(http, tmp_path)
+    finish(http, project, planner, plan(), "planner")
+    reviewer = next(i for i, w in works(http, project).items() if w["role"] == "architect")
+    with db.get_conn() as conn:
+        conn.execute("UPDATE runs SET session='author-session' WHERE project_id=? AND intent_id=?", (project, planner))
+    run = claim(http, project, reviewer, role="architect").json()
+    http.post(f"/projects/{project}/development/runs/{run['id']}/finish", headers=WORKER, json={
+        "token": run["token"], "session": "author-session", "outcome": "success",
+        "result": {"output": {"kind": "review", "verdict": "approve", "summary": "Trust my own work"}},
+    }).raise_for_status()
+    advance(http, project)
+    assert "independent session" in works(http, project)[reviewer]["checkpoint"]
+    assert not any(w["role"] == "implementer" for w in works(http, project).values())
+
+
+def test_repeated_review_disagreement_escalates_instead_of_looping_forever(http, tmp_path):
+    from cairn.server.development_workflow import apply_review
+    from cairn.server.development_models import DevelopmentOutcome
+    project, planner = create(http, tmp_path)
+    approve_plan(http, project, planner)
+    implementation = next(i for i, w in works(http, project).items() if w["key"] == "api")
+    with db.get_conn() as conn:
+        for index in range(2):
+            value = WorkPackage(role="reviewer", purpose="implementation", subject=implementation, revision=1)
+            apply_review(conn, project, {"session": None, "intent_id": "review"}, value,
+                         DevelopmentOutcome(kind="review", verdict="request_changes", summary="Acceptance still fails; reproduce API test"))
+        subject = store.work(conn, project, implementation)
+        assert subject.state == "reviewing" and subject.review_rounds == 2
+    assert len([w for w in works(http, project).values() if w["purpose"] == "arbitration"]) == 1

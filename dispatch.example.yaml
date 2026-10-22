@@ -1,71 +1,58 @@
-# Local execution example — workers run directly on the dispatcher host and reuse the
-# machine's already-configured claude / codex / pi CLIs. No API keys, base URLs or models
-# are configured here; each CLI uses its own host configuration and credentials.
-#
-# Usage:
-#   cp dispatch.example.yaml dispatch.yaml
-#   uv run --project cairn cairn serve                       # in one shell
-#   uv run --project cairn cairn dispatch --config dispatch.yaml
-#
-# Notes:
-# - Do NOT run the dispatcher via docker-compose in local mode: it must run on the host
-#   where the CLIs are installed, logged in, and on PATH. The server may still run anywhere.
-# - Local mode runs the agents with your user's permissions and no sandbox. Only use it in
-#   environments you are authorized to operate in.
-
-server: "http://127.0.0.1:8000"
+# Host CLI execution, with both model tiers routed through your Magpie installation.
+# Set MAGPIE_ANTHROPIC_BASE_URL, MAGPIE_API_KEY, MAGPIE_STRONG_MODEL,
+# MAGPIE_STANDARD_MODEL in the dispatcher's environment. No keys are stored here.
+# Use the actual endpoint/model IDs configured in Magpie; do not append /v1/messages.
+server: http://127.0.0.1:8000
 
 runtime:
-  execution: local            # run workers as host processes instead of per-project containers
-  worker_healthcheck: disabled  # no base_url to probe; startup instead checks the CLIs are on PATH
-  max_workers: 3              # all workers share this host — size to the machine
+  execution: local
+  worker_healthcheck: disabled  # startup still checks the CLI executable
+  prompt_group: development
+  max_workers: 3
+  max_project_workers: 3
   max_running_projects: 2
-  max_project_workers: 2
   interval: 3
   healthcheck_timeout: 15
-  prompt_group: "default"
 
-tasks:
-  bootstrap:
-    timeout: 120
-    conclude_timeout: 30
-  reason:
-    timeout: 45
-  explore:
-    timeout: 600
-    conclude_timeout: 120
-
-# Optional. If omitted: workspace_root defaults to the dispatcher's current directory,
-# completed_action defaults to keep. Each project gets an isolated <workspace_root>/<project_id>/.
 local:
-  # workspace_root: "/data/cairn-runs"
-  completed_action: keep       # keep | remove
+  workspace_root: .cairn/workspaces  # relative to this YAML, retained on stop/completion
+  completed_action: keep
 
-# Extra environment variables for every local worker process. These are merged over the
-# dispatcher's own environment ({**os.environ, **common_env}), so use it for things the
-# CLIs need at runtime, e.g. an outbound proxy. (Alternatively just `export` them in the
-# shell that starts the dispatcher — local workers inherit that environment.)
-# common_env:
-#   https_proxy: "http://127.0.0.1:7897"
-#   http_proxy: "http://127.0.0.1:7897"
-#   all_proxy: "http://127.0.0.1:7897"
+# Only single-call/process timeouts; no project budget or cumulative attempt limit.
+tasks:
+  development_timeout: 3600
+  bootstrap: {timeout: 120, conclude_timeout: 30}
+  reason: {timeout: 45}
+  explore: {timeout: 600, conclude_timeout: 120}
 
-# No API keys needed — the host CLIs are used as-is. Per-worker `env:` overrides common_env.
+# Optional for a nondefault serve --db-path; otherwise the default DB credential is read.
+# worker_token_file: .cairn/cairn.worker-token
+
 workers:
-  - name: "local-claude"
-    type: "claudecode"
-    task_types: [bootstrap, reason, explore]
+  - name: strong-design
+    type: claudecode
+    tier: strong
+    roles: [planner, architect]
     max_running: 1
     priority: 0
+    env_from:
+      ANTHROPIC_BASE_URL: MAGPIE_ANTHROPIC_BASE_URL
+      ANTHROPIC_AUTH_TOKEN: MAGPIE_API_KEY
+      ANTHROPIC_MODEL: MAGPIE_STRONG_MODEL
+    # Windows: npm .cmd shims are resolved to their Node entry automatically.
+    # For another installation, set a native argv prefix with absolute paths:
 
-  # - name: "local-codex"
-  #   type: "codex"
-  #   task_types: [explore]
-  #   max_running: 1
-  #   priority: 1
+  - name: standard-development
+    type: claudecode
+    tier: standard
+    roles: [implementer, reviewer]
+    max_running: 2
+    priority: 0
+    env_from:
+      ANTHROPIC_BASE_URL: MAGPIE_ANTHROPIC_BASE_URL
+      ANTHROPIC_AUTH_TOKEN: MAGPIE_API_KEY
+      ANTHROPIC_MODEL: MAGPIE_STANDARD_MODEL
 
-  # - name: "local-pi"
-  #   type: "pi"
-  #   task_types: [reason]
-  #   max_running: 1
-  #   priority: 2
+# Existing alternatives: type: codex (CODEX_MODEL, CODEX_BASE_URL, OPENAI_API_KEY),
+# type: pi (PI_MODEL, PI_BASE_URL, PI_API_KEY, PI_PROVIDER_API).
+# Use separate role profiles, not two dispatchers for the same project.

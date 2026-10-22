@@ -37,7 +37,13 @@ def write_artifact(directory: Path, name: str, content: str, kind="log", **metad
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / name
     path.write_text(content, encoding="utf-8")
-    return Evidence(kind=kind, path=str(path.resolve()), sha256=hashlib.sha256(path.read_bytes()).hexdigest(), **metadata)
+    return file_artifact(path, kind=kind, **metadata)
+
+
+def file_artifact(path: Path, kind="log", **metadata) -> Evidence:
+    with path.open("rb") as source:
+        digest = hashlib.file_digest(source, "sha256").hexdigest()
+    return Evidence(kind=kind, path=str(path.resolve()), sha256=digest, **metadata)
 
 
 class GitWorkspace:
@@ -123,22 +129,35 @@ class GitWorkspace:
             raise GitError("Configure nonempty project or reviewed work-package check commands")
         evidence = []
         passed = True
+        frozen = git(path, "rev-parse", "HEAD")
         for index, argv in enumerate(commands):
+            if cancellation.is_cancelled:
+                return False, evidence
             env = {k: v for k, v in os.environ.items() if k.upper() not in ("CAIRN_OPERATOR_TOKEN", "CAIRN_WORKER_TOKEN")}
             process = LocalProcess(argv, str(path), env, timeout_seconds=self.config.check_timeout)
+            artifact_dir.mkdir(parents=True, exist_ok=True)
+            process.stdout_path = artifact_dir / f"check-{index}.stdout.log"
+            process.stderr_path = artifact_dir / f"check-{index}.stderr.log"
             process.start()
             cancellation.attach_process(process)
             try:
                 result = process.communicate(timeout=self.config.check_timeout)
             finally:
                 cancellation.attach_process(None)
-            evidence.append(write_artifact(artifact_dir, f"check-{index}.log", result.stdout + "\n" + result.stderr,
-                                           kind="test", commit=git(path, "rev-parse", "HEAD"),
-                                           command=argv, exit_code=result.returncode))
+            evidence.extend(file_artifact(log, kind="test", commit=frozen, command=argv, exit_code=result.returncode)
+                            for log in (process.stdout_path, process.stderr_path))
             passed = passed and result.returncode == 0 and not result.cancelled and not result.timed_out
+            passed = passed and git(path, "rev-parse", "HEAD") == frozen and not git(path, "diff", frozen, "--")
             if cancellation.is_cancelled:
                 return False, evidence
         return passed, evidence
+
+    def check_commands(self, value: WorkPackage):
+        commands = list(self.config.checks)
+        for argv in value.checks:
+            if argv not in commands:
+                commands.append(argv)
+        return commands
 
     def diff(self, base, head):
         return git(self.repository, "diff", "--binary", base, head, "--")
@@ -158,13 +177,45 @@ class GitWorkspace:
         record["pushed_commit"] = head
         self.save_record(intent_id, record)
 
+    def sync_integration(self, require_active):
+        remote = self.config.remote
+        tip = git(self.repository, "ls-remote", remote, f"refs/heads/{self.branch}")
+        tip = tip.split()[0] if tip else None
+        if tip == self.base:
+            return
+        if tip is None:
+            require_active()
+            git(self.repository, "push", remote, f"{self.base}:refs/heads/{self.branch}")
+            return
+        ref = f"refs/remotes/{remote}/{self.branch}"
+        git(self.repository, "fetch", remote, f"refs/heads/{self.branch}:{ref}")
+        local_behind = command(["git", "-C", str(self.repository), "merge-base", "--is-ancestor", self.base, tip],
+                               self.repository, check=False).returncode == 0
+        remote_behind = command(["git", "-C", str(self.repository), "merge-base", "--is-ancestor", tip, self.base],
+                                self.repository, check=False).returncode == 0
+        if local_behind:
+            require_active()
+            git(self.repository, "merge", "--ff-only", ref)
+            self.base = git(self.repository, "rev-parse", "HEAD")
+        elif remote_behind:
+            require_active()
+            git(self.repository, "push", remote, f"{self.base}:refs/heads/{self.branch}")
+        else:
+            raise IntegrationWait("Local and remote integration histories diverged; preserving both for reconciliation")
+
     def integrate(self, intent_id, value: WorkPackage, artifact_dir: Path, cancellation):
+        def require_active():
+            if cancellation.is_cancelled:
+                raise IntegrationWait("Integration cancelled before its next side effect")
+
+        require_active()
         review = value.result["review"]
         head, base = review["commit"], review["base"]
         if git(self.repository, "status", "--porcelain"):
             raise IntegrationWait("Integration checkout has uncommitted files; preserving them")
         if git(self.repository, "symbolic-ref", "--short", "HEAD") != self.branch:
             raise IntegrationWait("Integration checkout is on another branch; no automatic checkout performed")
+        self.sync_integration(require_active)
         remote = self.config.remote
         remote_url = git(self.repository, "remote", "get-url", remote)
         match = re.search(r"(?:github\.com[:/])([^/]+/[^/]+?)(?:\.git)?$", remote_url)
@@ -173,6 +224,11 @@ class GitWorkspace:
         repository = match.group(1)
         gh = ["gh", "--repo", repository]
         branch = value.branch
+        if head == base and self.base == head:
+            path = self.snapshot("existing-" + artifact_dir.name, head)
+            passed, evidence = self.checks(path, self.check_commands(value), artifact_dir, cancellation)
+            return {"merge_commit": head, "integration_commit": head, "head_commit": head,
+                    "already_present": True, "pr_url": value.pr_url, "checks_passed": passed}, evidence
         prs = json.loads(command([*gh, "pr", "list", "--head", branch, "--base", self.branch, "--state", "all",
                                    "--json", "url,state,headRefOid,mergeCommit"], self.repository).stdout)
         existing = next((p for p in prs if p["headRefOid"] == head and p["state"] in ("OPEN", "MERGED")), None)
@@ -180,11 +236,13 @@ class GitWorkspace:
             remote_base = git(self.repository, "ls-remote", remote, f"refs/heads/{self.branch}").split()[0]
             if remote_base != base or self.base != base:
                 return {"needs_rebase": True, "detail": "Integration branch advanced; update implementation and review"}, []
+            require_active()
             self.push_feature(intent_id, head)
             body = artifact_dir / "pr-body.md"
             body.parent.mkdir(parents=True, exist_ok=True)
             body.write_text(f"Implements {intent_id}.\n\n{value.scope}\n\n"
                             f"Independent review: {review['summary']}\nReviewed head: {head}\nReviewed base: {base}\n", encoding="utf-8")
+            require_active()
             url = command([*gh, "pr", "create", "--head", branch, "--base", self.branch,
                            "--title", f"Implement {intent_id}", "--body-file", str(body)], self.repository).stdout.strip()
         else:
@@ -201,6 +259,7 @@ class GitWorkspace:
                     raise IntegrationWait("Waiting for required PR checks")
             if pr.get("reviewDecision") == "CHANGES_REQUESTED":
                 raise IntegrationWait("GitHub review requests changes")
+            require_active()
             command([*gh, "pr", "merge", url, "--merge", "--match-head-commit", head], self.repository)
             pr = json.loads(command([*gh, "pr", "view", url, "--json", fields], self.repository).stdout)
             if pr["state"] != "MERGED":
@@ -209,11 +268,14 @@ class GitWorkspace:
         if not merged:
             raise IntegrationWait("GitHub has not supplied the merge commit")
         git(self.repository, "fetch", remote, f"refs/heads/{self.branch}:refs/remotes/{remote}/{self.branch}")
+        require_active()
         git(self.repository, "merge", "--ff-only", f"refs/remotes/{remote}/{self.branch}")
         command(["git", "-C", str(self.repository), "merge-base", "--is-ancestor", merged, "HEAD"], self.repository)
         command(["git", "-C", str(self.repository), "merge-base", "--is-ancestor", head, merged], self.repository)
         actual = git(self.repository, "rev-parse", "HEAD")
+        merged_base = git(self.repository, "rev-parse", merged + "^1")
         snapshot = self.snapshot("integration-" + artifact_dir.name, actual)
-        passed, evidence = self.checks(snapshot, self.config.checks or value.checks, artifact_dir, cancellation)
+        passed, evidence = self.checks(snapshot, self.check_commands(value), artifact_dir, cancellation)
         return {"merge_commit": merged, "integration_commit": actual, "head_commit": head,
-                "pr_url": url, "checks_passed": passed}, evidence
+                "pr_url": url, "checks_passed": passed and merged_base == base,
+                "review_base_changed": merged_base != base}, evidence

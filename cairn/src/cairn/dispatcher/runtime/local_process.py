@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import logging
+import codecs
 import os
 import signal
 import subprocess
 import threading
 from contextlib import suppress
+from pathlib import Path
 
 from cairn.dispatcher.runtime.process import ProcessResult
 
@@ -14,6 +16,7 @@ LOG = logging.getLogger(__name__)
 READ_CHUNK_SIZE = 65536
 STREAM_JOIN_TIMEOUT_SECONDS = 5.0
 FORCE_KILL_REAP_TIMEOUT_SECONDS = 2.0
+CAPTURE_LIMIT = 4 * 1024 * 1024
 
 
 class LocalProcess:
@@ -48,6 +51,11 @@ class LocalProcess:
         self._kill_lock = threading.Lock()
         self._job = None
         self.on_started = None
+        self.stdout_path: Path | None = None
+        self.stderr_path: Path | None = None
+        self._stream_error: OSError | None = None
+        self._prefix = {"stdout": "", "stderr": ""}
+        self._dropped = {"stdout": False, "stderr": False}
 
     def start(self) -> None:
         if os.name == "nt":
@@ -83,10 +91,10 @@ class LocalProcess:
                 self._job.close()
             raise
         self._stdout_thread = threading.Thread(
-            target=self._drain, args=(self._process.stdout, self._stdout_chunks), daemon=True
+            target=self._drain, args=(self._process.stdout, self._stdout_chunks, "stdout"), daemon=True
         )
         self._stderr_thread = threading.Thread(
-            target=self._drain, args=(self._process.stderr, self._stderr_chunks), daemon=True
+            target=self._drain, args=(self._process.stderr, self._stderr_chunks, "stderr"), daemon=True
         )
         self._stdout_thread.start()
         self._stderr_thread.start()
@@ -108,6 +116,9 @@ class LocalProcess:
         if self._job is not None:
             with self._kill_lock:
                 self._job.close()
+        elif self._process.poll() is not None:
+            self._signal_group(self._process, signal.SIGTERM)
+            self._signal_group(self._process, signal.SIGKILL)
         if self._stdout_thread is not None:
             self._stdout_thread.join(timeout=STREAM_JOIN_TIMEOUT_SECONDS)
         if self._stderr_thread is not None:
@@ -115,10 +126,15 @@ class LocalProcess:
         returncode = self._process.returncode
         if returncode is None:
             returncode = 137 if self._timed_out else 1
+        stdout = self._captured(self._stdout_chunks, "stdout")
+        stderr = self._captured(self._stderr_chunks, "stderr")
+        if self._stream_error:
+            returncode = returncode or 1
+            stderr += f"\nCould not persist worker stream: {self._stream_error}"
         return ProcessResult(
             returncode=returncode,
-            stdout="".join(self._stdout_chunks),
-            stderr="".join(self._stderr_chunks),
+            stdout=stdout,
+            stderr=stderr,
             timed_out=self._timed_out,
             cancelled=self._cancel_reason is not None,
             cancel_reason=self._cancel_reason,
@@ -151,18 +167,55 @@ class LocalProcess:
     @staticmethod
     def _signal_group(process: subprocess.Popen[str], sig: int) -> None:
         try:
-            os.killpg(os.getpgid(process.pid), sig)
+            os.killpg(process.pid, sig)
         except (ProcessLookupError, PermissionError):
             with suppress(ProcessLookupError, PermissionError, ValueError):
                 process.send_signal(sig)
 
-    @staticmethod
-    def _drain(pipe, sink: list[str]) -> None:
+    def _captured(self, sink: list[str], stream: str) -> str:
+        text = "".join(sink)
+        return self._prefix[stream] + "\n[Middle output retained in the stream log]\n" + text if self._dropped[stream] else text
+
+    def _drain(self, pipe, sink: list[str], stream: str) -> None:
+        output = None
+        size = 0
         try:
-            for chunk in iter(lambda: pipe.read(READ_CHUNK_SIZE), ""):
+            path = getattr(self, stream + "_path")
+            if path is not None:
+                try:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    output = path.open("w", encoding="utf-8")
+                except OSError as exc:
+                    self._stream_error = exc
+            decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+            for raw in iter(lambda: pipe.buffer.read1(READ_CHUNK_SIZE), b""):
+                chunk = decoder.decode(raw)
+                if not self._prefix[stream]:
+                    self._prefix[stream] = chunk
                 sink.append(chunk)
+                size += len(chunk)
+                while size > CAPTURE_LIMIT and len(sink) > 1:
+                    size -= len(sink.pop(0))
+                    self._dropped[stream] = True
+                if output:
+                    try:
+                        output.write(chunk)
+                        output.flush()
+                    except OSError as exc:
+                        self._stream_error = exc
+                        with suppress(OSError):
+                            output.close()
+                        output = None
+            remaining = decoder.decode(b"", final=True)
+            if remaining:
+                sink.append(remaining)
+                if output:
+                    output.write(remaining)
         except (ValueError, OSError):
             pass
         finally:
+            if output:
+                with suppress(OSError):
+                    output.close()
             with suppress(Exception):
                 pipe.close()

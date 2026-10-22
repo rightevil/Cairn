@@ -184,6 +184,7 @@ def update_project_status(project_id: str, body: UpdateProjectStatusRequest, req
         if get_project_or_404(auth_conn, project_id)["development"]:
             require_operator(request)
     with get_conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
         expire_reason_leases(conn, project_id)
         row = get_project_or_404(conn, project_id)
         current_status = row["status"]
@@ -191,6 +192,10 @@ def update_project_status(project_id: str, body: UpdateProjectStatusRequest, req
             raise HTTPException(409, "Completed projects cannot change status")
         if current_status == body.status:
             return project_meta_from_row(row)
+        if body.status == "stopped" and row["development"]:
+            from cairn.server.development_store import stop_project
+            stop_project(conn, project_id)
+            return project_meta_from_row(get_project_or_404(conn, project_id))
 
         conn.execute(
             "UPDATE projects SET status = ? WHERE id = ?",

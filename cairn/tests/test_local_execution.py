@@ -342,8 +342,8 @@ def test_pi_local_driver_omits_models_json_and_provider() -> None:
     worker = _bare_worker("pi")
     argv = PiDriver(local=True).build_execute(worker, "PROMPT", None).argv
 
-    assert argv[0] == "/bin/sh"
-    assert "exec pi" in argv[2]
+    assert argv[0] == "pi"
+    assert "/bin/sh" not in argv
     assert "--provider" not in argv
     assert "--model" not in argv
     assert argv[-2:] == ["-p", "PROMPT"]
@@ -501,3 +501,36 @@ def test_local_snapshot_default_supports_unicode_and_spaces(tmp_path: Path) -> N
     assert files[0].is_absolute()
     assert files[0].read_text(encoding="utf-8") == "facts: []\n"
     assert str(files[0]).replace("\\", "/") in reference.replace("\\", "/")
+
+
+def test_long_output_is_persisted_while_memory_keeps_start_and_final_result(tmp_path: Path) -> None:
+    from cairn.dispatcher.runtime.local_process import CAPTURE_LIMIT, READ_CHUNK_SIZE
+    process = LocalProcess([sys.executable, "-c",
+        "import sys; print('SESSION-HEADER',flush=True); sys.stdout.write('x'*6000000); print('\\nFINAL-RESULT',flush=True)"],
+        str(tmp_path), dict(os.environ), timeout_seconds=20)
+    process.stdout_path, process.stderr_path = tmp_path / "stdout.log", tmp_path / "stderr.log"
+    process.start()
+    result = process.communicate(timeout=20)
+    assert result.returncode == 0
+    assert process.stdout_path.stat().st_size > 6_000_000
+    assert len(result.stdout) < CAPTURE_LIMIT + READ_CHUNK_SIZE + 100
+    assert result.stdout.startswith("SESSION-HEADER")
+    assert result.stdout.rstrip().endswith("FINAL-RESULT")
+
+
+def test_small_live_output_is_flushed_before_process_exits(tmp_path: Path) -> None:
+    process = LocalProcess([sys.executable, "-c", "import time; print('ready',flush=True); time.sleep(30)"],
+        str(tmp_path), dict(os.environ), timeout_seconds=20)
+    process.stdout_path = tmp_path / "stdout.log"
+    process.start()
+    try:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if process.stdout_path.exists() and "ready" in process.stdout_path.read_text(encoding="utf-8"):
+                break
+            time.sleep(0.02)
+        else:
+            pytest.fail("Live output stayed buffered until process exit")
+    finally:
+        process.cancel("test finished")
+        process.communicate(timeout=10)

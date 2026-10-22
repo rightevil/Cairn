@@ -172,3 +172,48 @@ def test_export_retains_work_and_control_ids_and_revisions(http, tmp_path):
     assert result["intents"][0]["work"]["role"] == "planner"
     assert result["hints"][0]["id"]
     assert result["hints"][0]["control"]["state"] == "received"
+
+
+def test_stop_then_resume_does_not_revive_the_old_attempt(http, tmp_path):
+    project, intent = create(http, tmp_path)
+    run = claim(http, project, intent).json()
+    http.put(f"/projects/{project}/status", headers=OPERATOR, json={"status": "stopped"}).raise_for_status()
+    http.put(f"/projects/{project}/status", headers=OPERATOR, json={"status": "active"}).raise_for_status()
+    url = f"/projects/{project}/development/runs/{run['id']}"
+    assert http.post(url + "/heartbeat", headers=WORKER, json={"token": run["token"]}).json()["cancel"] is True
+    result = http.post(url + "/finish", headers=WORKER, json={"token": run["token"], "outcome": "success"})
+    assert result.json()["state"] == "cancelled"
+
+
+def test_live_output_is_separate_from_hash_verified_evidence(http, tmp_path):
+    import hashlib
+    project, intent = create(http, tmp_path)
+    run = claim(http, project, intent).json()
+    directory = tmp_path / "runs" / run["id"]
+    directory.mkdir(parents=True)
+    log = directory / "stdout.log"
+    log.write_text("working", encoding="utf-8")
+    url = f"/projects/{project}/development/runs/{run['id']}"
+    http.post(url + "/heartbeat", headers=WORKER, json={"token": run["token"], "streams": {"stdout": str(log)}}).raise_for_status()
+    assert http.get(url + "/stream/stdout").status_code == 401
+    assert "not acceptance evidence" in http.get(url + "/stream/stdout", headers=OPERATOR).text
+    artifact = {"kind": "log", "path": str(log), "sha256": hashlib.sha256(log.read_bytes()).hexdigest()}
+    http.post(url + "/finish", headers=WORKER, json={"token": run["token"], "outcome": "success", "evidence": [artifact]}).raise_for_status()
+    assert http.get(url + "/evidence/0", headers=OPERATOR).text == "working"
+    log.write_text("tampered", encoding="utf-8")
+    assert http.get(url + "/evidence/0", headers=OPERATOR).status_code == 409
+
+
+def test_declared_shared_resources_serialize_across_projects_until_run_ends(http, tmp_path):
+    project, _ = create(http, tmp_path)
+    other, _ = create(http, tmp_path)
+    with db.get_conn() as conn:
+        first = store.add_intent(conn, project, "Use shared database", WorkPackage(revision=1, resources=["database:local-test"]))
+        second = store.add_intent(conn, other, "Use same database", WorkPackage(revision=1, resources=["database:local-test"]))
+        independent = store.add_intent(conn, other, "Independent feature", WorkPackage(revision=1, resources=["database:separate"]))
+    run = claim(http, project, first, role="implementer").json()
+    assert claim(http, other, second, role="implementer").status_code == 409
+    assert claim(http, other, independent, role="implementer").status_code == 200
+    http.post(f"/projects/{project}/development/runs/{run['id']}/finish", headers=WORKER,
+              json={"token": run["token"], "outcome": "cancelled"}).raise_for_status()
+    assert claim(http, other, second, role="implementer").status_code == 200

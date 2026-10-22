@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-import hashlib
 from importlib import resources
 import json
 import logging
@@ -15,7 +14,7 @@ import time
 from cairn.dispatcher.contracts import parse_json_output
 from cairn.dispatcher.models import RunningTask
 from cairn.dispatcher.runtime.cancellation import TaskCancellation
-from cairn.dispatcher.runtime.git_workspace import GitError, GitWorkspace, IntegrationWait, git, write_artifact
+from cairn.dispatcher.runtime.git_workspace import GitWorkspace, IntegrationWait, file_artifact, git, write_artifact
 from cairn.dispatcher.runtime.process_identity import process_identity, stop_owned_process
 from cairn.dispatcher.workers.registry import get_driver
 from cairn.server.development_models import DevelopmentOutcome, DevelopmentProject
@@ -39,7 +38,7 @@ def executable_argv(worker, argv):
         return [*worker.command, *argv[1:]]
     executable = shutil.which(argv[0])
     if os.name == "nt" and executable and Path(executable).suffix.lower() in (".cmd", ".bat"):
-        packages = {"claudecode": "@anthropic-ai/claude-code/cli.js", "codex": "@openai/codex/bin/codex.js"}
+        packages = {"claudecode": "@anthropic-ai/claude-code/cli.js", "codex": "@openai/codex/bin/codex.js", "pi": "@mariozechner/pi-coding-agent/dist/cli.js"}
         entry = Path(executable).parent / "node_modules" / packages.get(worker.type, "missing")
         node = shutil.which("node")
         if entry.is_file() and node:
@@ -157,6 +156,8 @@ class DevelopmentDispatcher:
         known = {i.id: i.work.model_dump(mode="json") for i in project.intents if i.work}
         atomic_json(directory / "work-index.json", known)
         subject = next((i for i in project.intents if i.id == intent.work.subject), None)
+        if subject and intent.work.purpose in ("plan", "implementation", "milestone") and intent.work.subject_run and subject.work.result.get("source_run_id") != intent.work.subject_run:
+            raise RuntimeError("Review candidate changed; stale review must not run")
         source_runs = [r for r in state["runs"] if subject and r["intent_id"] == subject.id]
         if intent.work.purpose == "direction":
             source_runs = [r for r in state["runs"] if r["state"] == "success" and r["role"] in ("implementer", "integration")][:20]
@@ -165,7 +166,7 @@ class DevelopmentDispatcher:
         evidence = [e for r in source_runs for e in r["evidence"]]
         for item in evidence:
             path = Path(item["path"]).resolve()
-            if not path.is_relative_to(self.directory) or not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != item["sha256"]:
+            if not path.is_relative_to(self.directory) or not path.is_file() or file_artifact(path).sha256 != item["sha256"]:
                 raise RuntimeError("Source evidence is missing, outside the data directory, or has changed")
         hints = [{"id": h.id, "content": h.content, "control": h.control.model_dump(mode="json")}
                  for h in project.hints if h.control and h.control.state in ("accepted", "applied", "experiment", "completed")]
@@ -204,14 +205,25 @@ class DevelopmentDispatcher:
 
         def heartbeat_loop():
             while not heartbeat_stop.wait(min(self.config.runtime.interval, 5)):
-                response = self.client.development(project.project.id, f"runs/{run['id']}/heartbeat", {"token": run["token"]})
-                if response.ok:
-                    last_success[0] = time.monotonic()
-                    atomic_json(checkpoint, response.data)
-                    if response.data.get("cancel"):
-                        cancellation.cancel("Project stopped")
-                elif response.status_code in (403, 404, 409) or time.monotonic() - last_success[0] > max(15, 3 * self.config.runtime.interval):
-                    cancellation.cancel("Run lease lost")
+                try:
+                    response = self.client.development(project.project.id, f"runs/{run['id']}/heartbeat", {"token": run["token"]})
+                    if response.ok:
+                        atomic_json(checkpoint, response.data)
+                        last_success[0] = time.monotonic()
+                        if response.data.get("cancel"):
+                            cancellation.cancel("Project stopped")
+                        elif worker is None and response.data.get("checkpoint_requested"):
+                            cancellation.cancel("Integration checkpoint requested")
+                    elif response.status_code in (403, 404, 409):
+                        cancellation.cancel("Run lease lost")
+                        return
+                except OSError:
+                    cancellation.cancel("Cannot persist run checkpoint")
+                    return
+                except Exception:
+                    LOG.warning("Heartbeat unavailable run=%s", run["id"], exc_info=True)
+                if time.monotonic() - last_success[0] > max(15, 3 * self.config.runtime.interval):
+                    cancellation.cancel("Run lease expired")
                     return
 
         thread = threading.Thread(target=heartbeat_loop, daemon=True)
@@ -239,6 +251,7 @@ class DevelopmentDispatcher:
                     subject = next((i for i in project.intents if i.id == intent.work.subject), None)
                     commit = subject.work.head_commit if subject and intent.work.purpose == "implementation" else None
                     worktree = repository.snapshot(run["id"], commit)
+                frozen_commit = git(worktree, "rev-parse", "HEAD")
                 context_path = self.context(project, intent, state, directory, run, worktree)
                 template = resources.files("cairn.dispatcher.prompts").joinpath("development", "task.md").read_text(encoding="utf-8")
                 prompt = template.replace("{role}", intent.work.role).replace("{context_path}", str(context_path)).replace(
@@ -251,12 +264,17 @@ class DevelopmentDispatcher:
                        "CAIRN_RUN_ID": run["id"], "CAIRN_RUN_TOKEN": run["token"]}
                 process = self.loop.container_manager.build_exec_process(str(worktree), env, argv,
                                       timeout_seconds=self.config.tasks.development_timeout)
+                process.stdout_path, process.stderr_path = directory / "stdout.log", directory / "stderr.log"
 
                 def started(process):
                     identity = process_identity(process.pid)
                     atomic_json(directory / "process.json", {"pid": process.pid, "identity": identity})
-                    self.call(project.project.id, f"runs/{run['id']}/heartbeat", {"token": run["token"],
-                              "pid": process.pid, "process_identity": identity, "session": session})
+                    current = self.call(project.project.id, f"runs/{run['id']}/heartbeat", {"token": run["token"],
+                                        "pid": process.pid, "process_identity": identity, "session": session,
+                                        "streams": {"stdout": str(process.stdout_path), "stderr": str(process.stderr_path)}})
+                    if current.get("cancel") or current.get("checkpoint_requested") or cancellation.is_cancelled:
+                        cancellation.cancel("Run superseded or stopped before CLI start")
+                        raise RuntimeError("Run superseded or stopped before CLI start")
 
                 process.on_started = started
                 process.start()
@@ -265,8 +283,7 @@ class DevelopmentDispatcher:
                     result = process.communicate(timeout=self.config.tasks.development_timeout)
                 finally:
                     cancellation.attach_process(None)
-                evidence.append(write_artifact(directory, "stdout.log", result.stdout))
-                evidence.append(write_artifact(directory, "stderr.log", result.stderr))
+                evidence.extend([file_artifact(process.stdout_path), file_artifact(process.stderr_path)])
                 session = driver.extract_session(session, result.stdout, result.stderr)
                 if result.cancelled or cancellation.is_cancelled:
                     outcome, detail = "cancelled", cancellation.reason or result.cancel_reason or "cancelled"
@@ -283,17 +300,20 @@ class DevelopmentDispatcher:
                     if intent.work.role == "implementer" and parsed.kind == "implemented":
                         head = repository.commit_implementation(worktree, intent.id)
                         base = intent.work.base_commit
-                        passed, checks = repository.checks(worktree, config.checks or intent.work.checks, directory, cancellation)
+                        from cairn.dispatcher.runtime.git_workspace import command
+                        command(["git", "-C", str(worktree), "merge-base", "--is-ancestor", base, head], worktree)
+                        passed, checks = repository.checks(worktree, repository.check_commands(intent.work), directory, cancellation)
                         evidence.extend(checks)
                         evidence.append(write_artifact(directory, "changes.diff", repository.diff(base, head), kind="diff", commit=head))
                         snapshot.update(head_commit=head, base_commit=base, branch=intent.work.branch, worktree=str(worktree), checks_passed=passed)
                         if not passed:
                             outcome, detail = "failed", "Implementation checks failed; see raw check logs"
+                        elif git(worktree, "diff", "HEAD", "--") or git(worktree, "rev-parse", "HEAD") != head:
+                            outcome, detail = "failed", "Check commands changed committed source; commit and recheck the actual result"
                     elif intent.work.role in ("reviewer", "architect") and intent.work.purpose in ("implementation", "milestone"):
                         subject = next(i for i in project.intents if i.id == intent.work.subject)
-                        commands = config.checks or subject.work.checks
-                        if not commands and intent.work.purpose == "milestone":
-                            commands = []
+                        commands = repository.check_commands(subject.work)
+                        if intent.work.purpose == "milestone":
                             for completed in project.intents:
                                 if completed.work and completed.work.role == "implementer" and completed.work.state == "verified":
                                     for argv in completed.work.checks:
@@ -303,11 +323,13 @@ class DevelopmentDispatcher:
                         evidence.extend(checks)
                         snapshot.update(checks_passed=passed, reviewed_commit=subject.work.head_commit,
                                         reviewed_base=subject.work.base_commit, integration_commit=git(worktree, "rev-parse", "HEAD"))
-                        if git(worktree, "diff", "HEAD", "--"):
+                        if git(worktree, "diff", frozen_commit, "--") or git(worktree, "rev-parse", "HEAD") != frozen_commit:
                             outcome, detail = "failed", "Reviewer changed tracked business code in its snapshot"
                         elif not passed:
                             outcome, detail = "failed", "Independent acceptance checks failed"
-                    elif git(worktree, "diff", "HEAD", "--"):
+                        elif intent.work.purpose == "milestone" and git(repository.repository, "rev-parse", f"refs/heads/{repository.branch}") != frozen_commit:
+                            outcome, detail = "failed", "Integration branch advanced during milestone verification; recheck the new commit"
+                    elif git(worktree, "diff", frozen_commit, "--") or git(worktree, "rev-parse", "HEAD") != frozen_commit:
                         outcome, detail = "failed", "Planning or review role changed tracked code"
         except IntegrationWait as exc:
             outcome, detail = "blocked", str(exc)
@@ -326,11 +348,13 @@ class DevelopmentDispatcher:
                        "result": {"output": output, "snapshot": snapshot},
                        "evidence": [e.model_dump(mode="json") for e in evidence],
                        "detail": detail, "checkpoint": detail, "retry_at": retry_at}
-            atomic_json(directory / "finish.json", payload)
-            result = self.client.development(project.project.id, f"runs/{run['id']}/finish", payload)
-            if result.ok or result.status_code == 409:
-                (directory / "delivered").touch()
-            self.owned.discard(run["id"])
+            try:
+                atomic_json(directory / "finish.json", payload)
+                result = self.client.development(project.project.id, f"runs/{run['id']}/finish", payload)
+                if result.ok or result.status_code == 409:
+                    (directory / "delivered").touch()
+            finally:
+                self.owned.discard(run["id"])
         return "success" if outcome == "success" else "failed"
 
 

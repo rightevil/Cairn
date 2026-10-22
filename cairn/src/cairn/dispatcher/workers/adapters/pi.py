@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import json
-from pathlib import PurePosixPath
+import hashlib
+import os
+import tempfile
+import uuid
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from cairn.dispatcher.config import WorkerConfig
@@ -94,9 +98,9 @@ class PiDriver(WorkerDriver):
         return self._wrap_with_models(worker, argv)
 
     def _local_argv(self, worker: WorkerConfig, prompt: str, session: str | None) -> list[str]:
-        # Native pi: no models.json injection and no --provider/--model overrides, so pi uses
-        # its own host configuration. A tiny sh wrapper just ensures the session dir exists.
-        session_dir = self._session_dir(worker)
+        agent_dir = Path(tempfile.gettempdir()) / "cairn-pi" / hashlib.sha256(worker.name.encode()).hexdigest()[:16]
+        session_dir = str(agent_dir / "sessions")
+        Path(session_dir).mkdir(parents=True, exist_ok=True)
         pi_argv = [
             "--mode",
             "json",
@@ -110,11 +114,23 @@ class PiDriver(WorkerDriver):
             "--tools",
             "read,write,edit,bash,grep,find,ls",
         ]
+        if worker.env.get("PI_BASE_URL"):
+            required = ("PI_BASE_URL", "PI_MODEL", "PI_API_KEY", "PI_PROVIDER_API")
+            if any(not worker.env.get(key) for key in required):
+                raise ValueError("Pi provider overrides require complete worker model/provider credentials")
+            temporary = agent_dir / (uuid.uuid4().hex + ".tmp")
+            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+                output.write(self._models_json(worker))
+            temporary.replace(agent_dir / "models.json")
+            worker.env["PI_CODING_AGENT_DIR"] = str(agent_dir)
+            pi_argv.extend(["--provider", "cairn"])
+        if worker.env.get("PI_MODEL"):
+            pi_argv.extend(["--model", worker.env["PI_MODEL"]])
         if session:
             pi_argv.extend(["--session", session])
         pi_argv.extend(["-p", prompt])
-        script = 'sdir="$1"\nshift\nmkdir -p "$sdir"\nexec pi "$@"\n'
-        return ["/bin/sh", "-lc", script, "--", session_dir, *pi_argv]
+        return ["pi", *pi_argv]
 
     def extract_session(self, session: str | None, stdout: str, stderr: str) -> str | None:
         if session:

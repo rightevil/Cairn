@@ -99,7 +99,7 @@ def configure(project_id: str, body: DevelopmentProject):
 def public_run(row):
     data = dict(row)
     data.pop("token_hash", None)
-    for key in ("result", "evidence"):
+    for key in ("result", "evidence", "streams"):
         data[key] = json.loads(data[key])
     return data
 
@@ -126,13 +126,36 @@ def evidence(project_id: str, run_id: str, index: int):
         path = Path(item["path"]).resolve()
         if path.parent.name != run_id or not path.is_file():
             raise HTTPException(409, "Evidence is not in its owned run directory")
-        content = path.read_bytes()
-        if hashlib.sha256(content).hexdigest() != item["sha256"]:
-            raise HTTPException(409, "Evidence hash changed")
-        text = content[:2_000_000].decode("utf-8", errors="replace")
-        if len(content) > 2_000_000:
+        with path.open("rb") as source:
+            if hashlib.file_digest(source, "sha256").hexdigest() != item["sha256"]:
+                raise HTTPException(409, "Evidence hash changed")
+            source.seek(0)
+            text = source.read(2_000_000).decode("utf-8", errors="replace")
+        if path.stat().st_size > 2_000_000:
             text += "\n[Preview truncated; full evidence retained on disk]"
         return PlainTextResponse(text)
+
+
+@router.get("/runs/{run_id}/stream/{channel}", dependencies=[Depends(require_reader)])
+def stream(project_id: str, run_id: str, channel: str):
+    from fastapi.responses import PlainTextResponse
+    if channel not in ("stdout", "stderr"):
+        raise HTTPException(404, "Unknown stream")
+    with get_conn() as conn:
+        row = conn.execute("SELECT streams FROM runs WHERE project_id=? AND id=?", (project_id, run_id)).fetchone()
+        if not row:
+            raise HTTPException(404, "Run not found")
+        value = json.loads(row["streams"]).get(channel)
+        if not value:
+            raise HTTPException(404, "No stream registered")
+        path = Path(value).resolve()
+        if path.parent.name != run_id or not path.is_file():
+            raise HTTPException(404, "No output yet")
+        with path.open("rb") as source:
+            size = path.stat().st_size
+            source.seek(max(0, size - 2_000_000))
+            text = source.read(2_000_000).decode("utf-8", errors="replace")
+        return PlainTextResponse("[Live output; not acceptance evidence]\n" + text)
 
 
 @router.get("", dependencies=[Depends(require_reader)])
@@ -186,6 +209,10 @@ def claim(project_id: str, intent_id: str, body: RunClaim):
         value = store.work(conn, project_id, intent_id)
         if value.role != body.role or value.revision != body.revision:
             raise HTTPException(409, "Role or control revision changed")
+        if store.stale_review(conn, project_id, value):
+            value.state = "superseded"
+            store.save_work(conn, project_id, intent_id, value)
+            return JSONResponse(status_code=409, content={"detail": "Review candidate changed; stale review superseded"})
         if affected(conn, project_id, intent_id, body.revision):
             raise HTTPException(409, "New directive requires a checkpoint before dispatch")
         allowed = ("approved", "merged") if body.phase == "integration" else ("ready", "waiting")
@@ -193,6 +220,8 @@ def claim(project_id: str, intent_id: str, body: RunClaim):
             raise HTTPException(409, "Work package is not ready")
         if body.phase == "integration" and (value.role != "implementer" or not value.result.get("review")):
             raise HTTPException(409, "Integration requires a reviewed implementation")
+        if body.phase == "integration" and value.result.get("pending_design"):
+            raise HTTPException(409, "Integration awaits the affected design decision")
         if body.phase == "integration" and conn.execute(
             "SELECT 1 FROM runs WHERE project_id=? AND role='integration' AND state='running'", (project_id,)
         ).fetchone():
@@ -207,7 +236,14 @@ def claim(project_id: str, intent_id: str, body: RunClaim):
         if conn.execute("SELECT 1 FROM runs WHERE project_id=? AND intent_id=? AND state='running'",
                         (project_id, intent_id)).fetchone():
             raise HTTPException(409, "Work package already has a live run")
+        for held in conn.execute("SELECT i.work FROM runs r JOIN intents i ON i.project_id=r.project_id AND i.id=r.intent_id WHERE r.state='running'"):
+            conflict = set(value.resources).intersection(WorkPackage.model_validate_json(held["work"]).resources)
+            if conflict:
+                raise HTTPException(409, "Shared resource is in use: " + ", ".join(sorted(conflict)))
         run_id, token = str(uuid.uuid4()), secrets.token_urlsafe(32)
+        if value.role == "planner":
+            config.state, config.wait_reason, config.wake_at = "active", "", None
+            store.save_project(conn, project_id, config)
         now = utcnow()
         conn.execute("INSERT INTO runs(id,project_id,intent_id,worker,role,revision,token_hash,host,started_at,heartbeat_at) "
                      "VALUES(?,?,?,?,?,?,?,?,?,?)",
@@ -231,8 +267,15 @@ def heartbeat(project_id: str, run_id: str, body: RunUpdate):
                      "checkpoint=COALESCE(?,checkpoint) WHERE id=?",
                      (utcnow(), body.session, body.pid, body.process_identity, body.checkpoint, run_id))
         conn.execute("UPDATE intents SET last_heartbeat_at=? WHERE project_id=? AND id=?", (utcnow(), project_id, row["intent_id"]))
+        if body.streams:
+            if any(key not in ("stdout", "stderr") or Path(path).resolve().parent.name != run_id
+                   for key, path in body.streams.items()):
+                raise HTTPException(422, "Streams must be in their owned run directory")
+            conn.execute("UPDATE runs SET streams=? WHERE id=?", (store.dump(body.streams), run_id))
+        value = store.work(conn, project_id, row["intent_id"])
         superseded = affected(conn, project_id, row["intent_id"], row["revision"])
-        return {"cancel": project_row["status"] != "active", "checkpoint_requested": superseded,
+        superseded = superseded or bool(value.result.get("pending_design")) or value.state == "superseded" or store.stale_review(conn, project_id, value)
+        return {"cancel": project_row["status"] != "active" or bool(row["cancel_requested"]), "checkpoint_requested": superseded,
                 "revision": config.revision, "requested_revision": config.requested_revision}
 
 
@@ -245,9 +288,9 @@ def finish(project_id: str, run_id: str, body: RunFinish):
             if row["result"] == store.dump(body.result) and row["state"] == body.outcome:
                 return public_run(row)
             raise HTTPException(409, "Run already ended")
-        stale = affected(conn, project_id, row["intent_id"], row["revision"])
         value = store.work(conn, project_id, row["intent_id"])
-        cancelled = get_project_or_404(conn, project_id)["status"] != "active"
+        stale = affected(conn, project_id, row["intent_id"], row["revision"]) or value.state == "superseded" or store.stale_review(conn, project_id, value)
+        cancelled = get_project_or_404(conn, project_id)["status"] != "active" or bool(row["cancel_requested"])
         outcome = "superseded" if stale else ("cancelled" if cancelled else body.outcome)
         conn.execute("UPDATE runs SET state=?,finished_at=?,session=COALESCE(?,session),result=?,evidence=?,detail=?,"
                      "retry_at=?,checkpoint=COALESCE(?,checkpoint) WHERE id=?",
@@ -331,10 +374,8 @@ def revoke(project_id: str, hint_id: str):
 @router.post("/stop", dependencies=[Depends(require_operator)])
 def stop(project_id: str):
     with get_conn() as conn:
-        store.project(conn, project_id)
-        conn.execute("UPDATE projects SET status='stopped' WHERE id=?", (project_id,))
-        store.event(conn, project_id, "stop_requested", project_id, "Cancel running work and stop new dispatch")
-        return {"state": "stopping"}
+        conn.execute("BEGIN IMMEDIATE")
+        return {"state": store.stop_project(conn, project_id)}
 
 
 @router.post("/runs/{run_id}/operations")

@@ -12,7 +12,7 @@ import yaml
 from cairn.dispatcher.config import DispatchConfig
 from cairn.dispatcher.protocol.client import ApiResult
 from cairn.dispatcher.runtime import git_workspace as workspace_module
-from cairn.dispatcher.runtime.git_workspace import GitWorkspace, GitError, git
+from cairn.dispatcher.runtime.git_workspace import GitWorkspace, GitError, IntegrationWait, git
 from cairn.dispatcher.runtime.cancellation import TaskCancellation
 from cairn.dispatcher.scheduler.loop import DispatcherLoop
 from cairn.server.development_models import DevelopmentProject, WorkPackage
@@ -53,6 +53,63 @@ def test_checks_record_real_failure_instead_of_accepting_worker_claim(repository
     passed, evidence = manager.checks(path, [[sys.executable, "-c", "raise SystemExit(7)"]], tmp_path / "artifacts", TaskCancellation())
     assert passed is False and evidence[0].exit_code == 7
     assert Path(evidence[0].path).is_file()
+
+
+def test_successful_check_cannot_change_the_code_it_verifies(repository, tmp_path):
+    manager = GitWorkspace(DevelopmentProject(repository=str(repository), design="Build application"), tmp_path / "data", "proj_001")
+    path = manager.snapshot("review")
+    passed, evidence = manager.checks(path, [[sys.executable, "-c", "from pathlib import Path; Path('README.md').write_text('changed')"]], tmp_path / "artifacts", TaskCancellation())
+    assert passed is False and evidence[0].exit_code == 0
+
+
+def test_integration_sync_fast_forwards_both_sides_and_preserves_divergence(repository, tmp_path):
+    bare = tmp_path / "remote.git"
+    subprocess.run(["git", "clone", "--bare", str(repository), str(bare)], check=True, capture_output=True)
+    git(repository, "remote", "add", "origin", str(bare))
+    manager = GitWorkspace(DevelopmentProject(repository=str(repository), design="Build application"), tmp_path / "data", "proj_001")
+    (repository / "local.txt").write_text("local")
+    git(repository, "add", ".")
+    git(repository, "commit", "-m", "Local baseline")
+    manager.base = git(repository, "rev-parse", "HEAD")
+    manager.sync_integration(lambda: None)
+    assert git(bare, "rev-parse", "main") == manager.base
+    remote_checkout = tmp_path / "remote-checkout"
+    git(bare, "worktree", "add", str(remote_checkout), "main")
+
+    def commit_remote(name):
+        (remote_checkout / name).write_text("remote")
+        git(remote_checkout, "add", ".")
+        git(remote_checkout, "-c", "user.name=Remote", "-c", "user.email=remote@localhost", "commit", "-m", name)
+
+    commit_remote("remote.txt")
+    manager.sync_integration(lambda: None)
+    assert (repository / "remote.txt").read_text() == "remote"
+    (repository / "divergent-local.txt").write_text("keep local")
+    git(repository, "add", ".")
+    git(repository, "commit", "-m", "Divergent local")
+    manager.base = git(repository, "rev-parse", "HEAD")
+    commit_remote("divergent-remote.txt")
+    with pytest.raises(IntegrationWait, match="diverged"):
+        manager.sync_integration(lambda: None)
+    assert (repository / "divergent-local.txt").read_text() == "keep local"
+
+
+def test_already_present_feature_is_checked_without_creating_an_empty_pr(repository, tmp_path, monkeypatch):
+    bare = tmp_path / "remote.git"
+    subprocess.run(["git", "clone", "--bare", str(repository), str(bare)], check=True, capture_output=True)
+    git(repository, "remote", "add", "origin", str(bare))
+    original = workspace_module.git
+
+    def url(repo, *args, **kwargs):
+        if args == ("remote", "get-url", "origin"):
+            return "https://github.com/example/project.git"
+        return original(repo, *args, **kwargs)
+
+    monkeypatch.setattr(workspace_module, "git", url)
+    manager = GitWorkspace(DevelopmentProject(repository=str(repository), design="Build application", checks=[["git", "diff", "--check"]]), tmp_path / "data", "proj_001")
+    value = WorkPackage(revision=1, result={"review": {"commit": manager.base, "base": manager.base, "summary": "Already implemented"}})
+    result, evidence = manager.integrate("i001", value, tmp_path / "run-no-op", TaskCancellation())
+    assert result["already_present"] and result["checks_passed"] and evidence
 
 
 class Client:

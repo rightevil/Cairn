@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
@@ -75,3 +76,26 @@ def test_real_capacity_reset_information_is_used_without_a_project_budget():
     assert capacity_retry_at('429 {"reset_at":"2099-01-01T00:00:00Z"}') == "2099-01-01T00:00:00Z"
     assert capacity_retry_at("Retry-After: 60") is not None
     assert capacity_retry_at("unknown reset time") is None
+
+
+def test_development_example_loads_both_tiers_from_magpie_environment(monkeypatch):
+    from cairn.dispatcher.config import DispatchConfig
+    for key, value in {"MAGPIE_ANTHROPIC_BASE_URL": "http://127.0.0.1:9999", "MAGPIE_API_KEY": "test-only",
+                       "MAGPIE_STRONG_MODEL": "strong-model", "MAGPIE_STANDARD_MODEL": "standard-model"}.items():
+        monkeypatch.setenv(key, value)
+    config = DispatchConfig.load(Path(__file__).resolve().parents[2] / "dispatch.example.yaml")
+    assert config.workers[0].env["ANTHROPIC_MODEL"] == "strong-model"
+    assert config.workers[1].env["ANTHROPIC_MODEL"] == "standard-model"
+    assert Path(config.local.workspace_root).is_absolute()
+    assert config.runtime.prompt_group == "development"
+
+
+def test_pi_local_provider_uses_native_argv_and_private_model_file(tmp_path, monkeypatch):
+    from cairn.dispatcher.workers.adapters.pi import PiDriver
+    monkeypatch.setattr("tempfile.gettempdir", lambda: str(tmp_path))
+    role = worker("pi", env={"PI_BASE_URL": "http://localhost:9999/v1", "PI_API_KEY": "test-only", "PI_MODEL": "model",
+                             "PI_PROVIDER_API": "openai-completions"})
+    argv = PiDriver(local=True).build_execute(role, "prompt", None).argv
+    assert argv[0] == "pi" and "/bin/sh" not in argv and "--provider" in argv
+    model_file = Path(role.env["PI_CODING_AGENT_DIR"]) / "models.json"
+    assert json.loads(model_file.read_text())["providers"]["cairn"]["baseUrl"] == "http://localhost:9999/v1"

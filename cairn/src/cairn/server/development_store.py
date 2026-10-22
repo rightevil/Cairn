@@ -41,6 +41,10 @@ def migrate(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
     if "process_identity" not in {row["name"] for row in conn.execute("PRAGMA table_info(runs)")}:
         conn.execute("ALTER TABLE runs ADD COLUMN process_identity TEXT")
+    if "streams" not in {row["name"] for row in conn.execute("PRAGMA table_info(runs)")}:
+        conn.execute("ALTER TABLE runs ADD COLUMN streams TEXT NOT NULL DEFAULT '{}'")
+    if "cancel_requested" not in {row["name"] for row in conn.execute("PRAGMA table_info(runs)")}:
+        conn.execute("ALTER TABLE runs ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0")
 
 
 def dump(value: Any) -> str:
@@ -64,6 +68,19 @@ def save_project(conn: sqlite3.Connection, project_id: str, value: DevelopmentPr
     conn.execute("UPDATE projects SET development = ? WHERE id = ?", (dump(value), project_id))
 
 
+def stop_project(conn: sqlite3.Connection, project_id: str) -> str:
+    project(conn, project_id)
+    status = conn.execute("SELECT status FROM projects WHERE id=?", (project_id,)).fetchone()["status"]
+    if status == "completed":
+        return status
+    conn.execute("UPDATE projects SET status='stopped' WHERE id=?", (project_id,))
+    conn.execute("UPDATE runs SET cancel_requested=1 WHERE project_id=? AND state='running'", (project_id,))
+    if status != "stopped":
+        event(conn, project_id, "stop_requested", project_id, "Cancel running work and stop new dispatch")
+    running = conn.execute("SELECT 1 FROM runs WHERE project_id=? AND state='running'", (project_id,)).fetchone()
+    return "stopping" if running else "stopped"
+
+
 def work(conn: sqlite3.Connection, project_id: str, intent_id: str) -> WorkPackage:
     row = conn.execute("SELECT work FROM intents WHERE project_id = ? AND id = ?", (project_id, intent_id)).fetchone()
     if row is None:
@@ -77,6 +94,13 @@ def save_work(conn: sqlite3.Connection, project_id: str, intent_id: str, value: 
     conn.execute("UPDATE intents SET work = ? WHERE project_id = ? AND id = ?", (dump(value), project_id, intent_id))
 
 
+def stale_review(conn: sqlite3.Connection, project_id: str, value: WorkPackage) -> bool:
+    if value.purpose not in ("plan", "implementation", "milestone") or not value.subject_run:
+        return False
+    subject = work(conn, project_id, value.subject)
+    return subject.state in ("verified", "superseded") or bool(subject.result.get("pending_design")) or subject.result.get("source_run_id") != value.subject_run
+
+
 def event(conn: sqlite3.Connection, project_id: str, kind: str, subject: str, detail: str) -> None:
     from cairn.server.services import utcnow
     conn.execute("INSERT INTO development_events(project_id,kind,subject,detail,created_at) VALUES(?,?,?,?,?)",
@@ -87,6 +111,7 @@ def add_intent(conn: sqlite3.Connection, project_id: str, description: str, valu
                sources: list[str] | None = None) -> str:
     from cairn.server.services import next_intent_id, utcnow, validate_facts_exist
     sources = sources or ["origin"]
+    value.design_revision = project(conn, project_id).design_revision
     validate_facts_exist(conn, project_id, sources)
     intent_id = next_intent_id(conn, project_id)
     conn.execute("INSERT INTO intents(id,project_id,description,creator,created_at,work) VALUES(?,?,?,?,?,?)",
