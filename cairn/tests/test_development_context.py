@@ -7,7 +7,7 @@ from cairn.dispatcher.config import LocalConfig, WorkerConfig
 from cairn.dispatcher.development import DevelopmentDispatcher
 from cairn.server import db, development_store as store
 from cairn.server.development_models import WorkPackage
-from test_development_api import create, http
+from test_development_api import create, http, claim, WORKER
 from test_development_runtime import Client
 
 
@@ -42,3 +42,26 @@ def test_context_keeps_full_current_evidence_without_inlining_unrelated_history(
         assert context["subject"]["work"] == index[old_id]
     else:
         assert len(path.read_bytes()) < len(json.dumps(large_result)) // 10
+
+
+def test_attempt_history_survives_project_run_list_pagination(http, tmp_path):
+    project_id, planner = create(http, tmp_path)
+    previous = claim(http, project_id, planner).json()
+    http.post(f"/projects/{project_id}/development/runs/{previous['id']}/finish", headers=WORKER,
+        json={"token": previous["token"], "outcome": "cancelled", "detail": "Preserved diagnosis",
+              "result": {"next_step": "Repair the targeted check"}}).raise_for_status()
+    client = Client(http)
+    project = client.get_project(project_id)
+    intent = next(i for i in project.intents if i.id == planner)
+    dispatcher = DevelopmentDispatcher(SimpleNamespace(client=client,
+        config=SimpleNamespace(local=LocalConfig(workspace_root=str(tmp_path / "data")))))
+    state = client.development(project_id).data
+    state["runs"] = []  # Other packages' runs have displaced this task from the project window.
+    worker = WorkerConfig(name="strong", type="claudecode", tier="strong", roles=["planner"], max_running=1, priority=0)
+    path = dispatcher.context(project, intent, state, tmp_path / "retry", {"id": "new-run"}, tmp_path, worker)
+    context = json.loads(path.read_text(encoding="utf-8"))
+    history = json.loads((path.parent / "attempt-history.json").read_text(encoding="utf-8"))
+    assert history[0]["run_id"] == previous["id"]
+    assert history[0]["result"]["next_step"] == "Repair the targeted check"
+    assert history[0]["detail"] == "Preserved diagnosis"
+    assert "token" not in history[0]
