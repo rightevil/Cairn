@@ -4,6 +4,7 @@ function developmentFeatures() {
     developmentState: { runs: [], events: [], operations: [] },
     developmentError: '',
     developmentProjectId: '',
+    developmentNow: Date.now(),
     newDevelopment: { enabled: true, repository: '', integration_branch: '', design: '', checks: '' },
     developmentControl: { kind: 'suggestion', content: '', scope: '', replaces: '' },
     developmentArtifact: { open: false, name: '', text: '' },
@@ -28,6 +29,7 @@ function developmentFeatures() {
     },
 
     async loadDevelopment(id) {
+      this.developmentNow = Date.now();
       if (this.developmentProjectId !== id) {
         this.developmentState = { runs: [], events: [], operations: [] };
         this.developmentProjectId = id;
@@ -46,6 +48,27 @@ function developmentFeatures() {
 
     developmentWork() {
       return (this.project?.intents || []).filter(intent => intent.work).slice().reverse();
+    },
+
+    runningDevelopmentRuns() {
+      return this.developmentState.runs.filter(run => run.state === 'running');
+    },
+
+    developmentTime(timestamp) {
+      if (!timestamp) return '暂无记录';
+      return new Date(timestamp).toLocaleString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+    },
+
+    developmentRunStatus(run) {
+      if (run.state !== 'running') return this.statusLabel(run.state);
+      if (run.cancel_requested) return '正在停止，等待进程收尾';
+      const heartbeat = Date.parse(run.heartbeat_at);
+      if (!Number.isFinite(heartbeat) || this.developmentNow - heartbeat > 60000) return '心跳待确认，等待执行器核对';
+      if (!run.pid && run.role !== 'integration') return '准备工作区／启动进程';
+      const intent = this.project?.intents?.find(item => item.id === run.intent_id);
+      if (run.role === 'planner') return intent?.work?.result?.review_feedback ? '修订方案中' : '规划中';
+      return { architect: '审查／设计中', reviewer: '独立审查中', implementer: '实现中', integration: '合并与集成验证中' }[run.role] || '执行中';
     },
 
     developmentText(text) {
@@ -93,7 +116,11 @@ function developmentFeatures() {
       if (work.state === 'superseded') return '已替代';
       if (work.role === 'implementer' && work.state === 'reviewing' && (!work.head_commit || work.result?.pending_design)) return '等待设计决策';
       if (work.role === 'implementer') return { ready: '待实现', running: '实现中', waiting: '等待条件', implemented: '已实现', reviewing: '已实现 · 待审查', approved: '已实现 · 待合并', merged: '已合并 · 待验证', verified: '已验证', rejected: '需修订' }[work.state] || work.state;
-      if (work.role === 'planner') return work.state === 'verified' ? '已决定' : work.state === 'reviewing' ? '提议 · 待审查' : work.state === 'waiting' ? '等待条件' : '提议中';
+      if (work.role === 'planner') {
+        if (work.state === 'running') return work.result?.review_feedback ? '修订方案中' : '规划中';
+        if (work.state === 'ready') return work.result?.review_feedback ? '待修订 · 等待领取' : '待规划 · 等待领取';
+        return work.state === 'verified' ? '已决定' : work.state === 'reviewing' ? '提议 · 待审查' : work.state === 'waiting' ? '等待条件' : '提议中';
+      }
       if (work.result?.output?.verdict) return { approve: '审查通过', request_changes: '需修订', needs_design: '需设计决策', reject: '已拒绝', defer: '暂缓', experiment: '采用实验' }[work.result.output.verdict];
       return work.state === 'verified' ? '已决定' : work.state === 'waiting' ? '等待条件' : '审查／决策中';
     },

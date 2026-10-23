@@ -1,0 +1,34 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
+
+const root = path.join(__dirname, '../src/cairn/server/static');
+const context = vm.createContext({ sessionStorage: { getItem: () => null }, tailwind: {} });
+vm.runInContext(fs.readFileSync(path.join(root, 'development.js'), 'utf8'), context);
+const html = fs.readFileSync(path.join(root, 'index.html'), 'utf8');
+for (const script of html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g)) vm.runInContext(script[1], context);
+const app = context.cairnApp();
+const now = Date.parse('2026-10-23T07:46:00Z');
+app.developmentNow = now;
+app.project = { intents: [{ id: 'i001', work: { role: 'planner', state: 'running', result: { review_feedback: 'Fix check paths' } } }] };
+const run = { id: 'run-1', intent_id: 'i001', worker: 'strong-design', role: 'planner', state: 'running', pid: 31152,
+  started_at: '2026-10-23T07:41:09Z', heartbeat_at: new Date(now - 3000).toISOString() };
+app.developmentState.runs = [run, { ...run, id: 'old-run', state: 'cancelled' }];
+assert.equal(app.runningDevelopmentRuns().length, 1);
+assert.equal(app.developmentRunStatus(run), '修订方案中');
+assert.equal(app.developmentPhase(app.project.intents[0]), '修订方案中');
+assert.equal(app.developmentPhase({ work: { role: 'planner', state: 'ready', result: { review_feedback: 'Fix checks' } } }), '待修订 · 等待领取');
+assert.equal(app.developmentPhase({ work: { role: 'planner', state: 'running', result: {} } }), '规划中');
+assert.equal(app.developmentPhase({ work: { role: 'planner', state: 'reviewing', result: {} } }), '提议 · 待审查');
+assert.equal(app.developmentRunStatus({ ...run, cancel_requested: 1 }), '正在停止，等待进程收尾');
+assert.equal(app.developmentRunStatus({ ...run, heartbeat_at: new Date(now - 61000).toISOString() }), '心跳待确认，等待执行器核对');
+assert.equal(app.developmentRunStatus({ ...run, heartbeat_at: null }), '心跳待确认，等待执行器核对');
+assert.equal(app.developmentRunStatus({ ...run, pid: null }), '准备工作区／启动进程');
+assert.equal(app.developmentRunStatus({ ...run, pid: null, role: 'integration' }), '合并与集成验证中');
+assert.equal(app.developmentRunStatus({ ...run, state: 'cancelled' }), '已取消');
+assert(app.developmentTime(run.started_at).includes('41:09'));
+assert(html.includes('最近心跳：') && html.includes('当前 Worker（'));
+assert(html.includes('run.worker') && html.includes('run.pid'));
+assert(!html.includes('formatTimelineDate(run.started_at)'));
+console.log('Development UI checks passed: revision phase, live workers, stop/stale/startup states and full timestamps');

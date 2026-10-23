@@ -604,6 +604,19 @@
               <button @click="showLocalPrefs = true" class="text-xs text-brand-600">操作令牌设置</button>
               <button @click="stopDevelopment()" :disabled="project.project.status !== 'active' || replay.active" class="ml-3 text-xs text-rose-600 disabled:opacity-40">立即停止</button>
             </section>
+            <section x-show="operatorToken && !developmentError" class="rounded-xl border bg-white p-3 space-y-2">
+              <h3 class="font-semibold text-sm" x-text="'当前 Worker（' + runningDevelopmentRuns().length + '）'"></h3>
+              <p x-show="!runningDevelopmentRuns().length" class="text-xs text-slate-500" x-text="project.project.status === 'active' ? '当前没有执行中的 Worker，请查看任务的等待原因与恢复时间。恢复项目后仍需保持 dispatch 调度器运行。' : '当前没有执行中的 Worker。'"></p>
+              <template x-for="run in runningDevelopmentRuns()" :key="run.id">
+                <article class="rounded-lg border border-teal-200 bg-teal-50 p-2 text-xs space-y-1">
+                  <p class="font-medium text-teal-800" x-text="developmentRunStatus(run)"></p>
+                  <p class="break-all" x-text="run.worker + ' · ' + run.intent_id + (run.pid ? ' · PID ' + run.pid : '')"></p>
+                  <p class="text-slate-600" x-text="'开始：' + developmentTime(run.started_at)"></p>
+                  <p class="text-slate-600" x-text="'最近心跳：' + developmentTime(run.heartbeat_at)"></p>
+                </article>
+              </template>
+              <p x-show="runningDevelopmentRuns().length" class="text-[11px] text-slate-500">心跳表示执行器仍在续约，不代表模型已产生新输出。日志可能在本轮结束时才完整写入。</p>
+            </section>
             <section class="rounded-xl border bg-white p-3 space-y-2">
               <h3 class="font-semibold text-sm">向黑板添加调整</h3>
               <select x-model="developmentControl.kind" aria-label="调整类型" class="w-full border rounded-lg p-2 text-xs">
@@ -643,7 +656,7 @@
                     <p x-show="intent.work.resources?.length" class="text-slate-500 break-all" x-text="'互斥资源：' + (intent.work.resources || []).join(', ')"></p>
                     <template x-for="criterion in intent.work.acceptance"><p class="text-slate-500" x-text="'• ' + criterion"></p></template>
                     <p class="whitespace-pre-wrap break-words" x-text="developmentText(intent.work.checkpoint)"></p>
-                    <p x-show="intent.work.retry_at" class="text-amber-700" x-text="'恢复时间：' + formatTimelineDate(intent.work.retry_at)"></p>
+                    <p x-show="intent.work.retry_at" class="text-amber-700" x-text="'恢复时间：' + developmentTime(intent.work.retry_at)"></p>
                     <p class="font-mono text-[10px] break-all" x-text="intent.work.branch || ''"></p>
                     <a x-show="developmentLink(intent.work.pr_url)" :href="developmentLink(intent.work.pr_url)" target="_blank" rel="noopener noreferrer" class="text-brand-600">查看 PR</a>
                     <p x-show="intent.work.merge_commit" class="font-mono text-[10px] break-all" x-text="'合并提交：' + intent.work.merge_commit"></p>
@@ -655,7 +668,7 @@
               <h3 class="font-semibold text-sm">运行与原始证据</h3>
               <template x-for="run in developmentState.runs" :key="run.id">
                 <details class="rounded-xl border bg-white p-3 text-xs">
-                  <summary class="cursor-pointer"><span x-text="developmentRole(run.role)"></span> · <span x-text="statusLabel(run.state)"></span><span class="block text-slate-400" x-text="formatTimelineDate(run.started_at)"></span></summary>
+                  <summary class="cursor-pointer"><span x-text="developmentRole(run.role)"></span> · <span x-text="developmentRunStatus(run)"></span><span class="block text-slate-400 break-all" x-text="run.worker + ' · ' + run.intent_id + (run.pid ? ' · PID ' + run.pid : '')"></span><span class="block text-slate-400" x-text="developmentTime(run.started_at)"></span></summary>
                   <p class="mt-2 whitespace-pre-wrap break-words" x-text="run.detail || run.checkpoint"></p>
                   <p class="text-slate-500" x-text="run.result?.snapshot?.requested_model ? '请求模型：' + run.result.snapshot.requested_model : ''"></p>
                   <div x-show="run.state === 'running'" class="mt-2 flex gap-3"><button x-show="run.streams?.stdout" @click="viewDevelopmentStream(run, 'stdout')" class="text-brand-600 underline">实时输出</button><button x-show="run.streams?.stderr" @click="viewDevelopmentStream(run, 'stderr')" class="text-brand-600 underline">实时错误</button></div>
@@ -669,7 +682,7 @@
             </section>
             <section class="space-y-2">
               <h3 class="font-semibold text-sm">流程事件</h3>
-              <template x-for="event in developmentState.events.slice(0, 30)" :key="event.id"><div class="border-l-2 border-teal-200 pl-3 text-xs"><p class="whitespace-pre-wrap break-words" x-text="developmentText(event.detail)"></p><p class="text-slate-400" x-text="formatTimelineDate(event.created_at)"></p></div></template>
+              <template x-for="event in developmentState.events.slice(0, 30)" :key="event.id"><div class="border-l-2 border-teal-200 pl-3 text-xs"><p class="whitespace-pre-wrap break-words" x-text="developmentText(event.detail)"></p><p class="text-slate-400" x-text="developmentTime(event.created_at)"></p></div></template>
             </section>
           </div>
         </template>
