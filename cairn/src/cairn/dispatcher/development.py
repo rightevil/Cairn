@@ -120,6 +120,15 @@ class DevelopmentDispatcher:
                 value = intent.work
                 if value is None:
                     continue
+                diagnostic = value.checkpoint
+                for configured in self.config.workers:
+                    for key, secret in configured.env.items():
+                        if secret and any(marker in key.upper() for marker in ("KEY", "TOKEN", "PASSWORD", "SECRET")):
+                            diagnostic = diagnostic.replace(secret, "[redacted]")
+                self.loop._log_changed(f"development:{summary.id}:{intent.id}:state", logging.INFO,
+                    "Development work project=%s intent=%s role=%s state=%s retry_at=%s dependencies=%s detail=%s",
+                    summary.id, intent.id, value.role, value.state, value.retry_at, tuple(value.dependencies),
+                    " ".join(diagnostic.split())[-1000:])
                 if value.role == "implementer" and any(i.work and i.work.purpose == "direction" and
                     i.work.state in ("ready", "running", "implemented") for i in project.intents):
                     continue
@@ -155,6 +164,8 @@ class DevelopmentDispatcher:
                 self.loop.futures[future] = RunningTask(summary.id, "development." + ("integration" if integration else value.role),
                                                       name, cancellation, intent_id=intent.id)
                 self.loop.runtime_project_ids.add(summary.id)
+                LOG.info("Development task started project=%s intent=%s role=%s worker=%s run=%s",
+                         summary.id, intent.id, value.role, name, run["id"])
                 return True
             return False
         except (RuntimeError, OSError) as exc:

@@ -216,6 +216,7 @@ class DispatcherLoop:
         if not active:
             self._log_changed("dispatch/global", logging.INFO, "skip dispatch because no active projects")
             return
+        self._log_changed("dispatch/global", logging.INFO, "active projects=%s", sorted(summary.id for summary in active))
 
         running_projects = self._ordered_projects(
             [summary for summary in active if summary.id in self.runtime_project_ids]

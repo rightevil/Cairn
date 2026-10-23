@@ -73,6 +73,20 @@ def test_cyclic_plan_is_rejected_without_partial_tasks(http, tmp_path):
     assert "cycle" in values[planner]["checkpoint"]
 
 
+@pytest.mark.parametrize("dependency,diagnostic", [("g15", "unknown Cairn work keys/intent IDs: g15"),
+                                                 ("api", "cannot depend on itself")])
+def test_invalid_plan_dependency_explains_how_to_correct_it(http, tmp_path, dependency, diagnostic):
+    project, planner = create(http, tmp_path)
+    candidate = plan()
+    candidate["work"][0]["dependencies"] = [dependency]
+    finish(http, project, planner, candidate, "planner")
+    values = works(http, project)
+    assert len(values) == 1
+    assert values[planner]["state"] == "waiting"
+    assert values[planner]["retry_at"]
+    assert diagnostic in values[planner]["checkpoint"]
+
+
 def test_fake_implementation_without_raw_snapshot_and_checks_is_not_accepted(http, tmp_path):
     project, planner = create(http, tmp_path)
     approve_plan(http, project, planner)

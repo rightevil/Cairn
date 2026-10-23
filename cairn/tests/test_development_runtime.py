@@ -169,6 +169,54 @@ def test_development_failure_log_shows_reason_and_artifact_path_without_credenti
     assert "private-test-key" not in caplog.text and "[redacted]" in caplog.text
 
 
+def test_resume_dispatch_reports_rejected_plan_wait_and_restarts_when_due(http, tmp_path, caplog):
+    from concurrent.futures import Future
+    from cairn.dispatcher.config import LocalConfig, WorkerConfig
+    from cairn.server import db, development_store as store
+    from test_development_api import create
+    from test_development_workflow import finish, plan
+
+    project, planner = create(http, tmp_path)
+    candidate = plan()
+    candidate["work"][0]["dependencies"] = ["g15"]
+    finish(http, project, planner, candidate, "planner")
+    with db.get_conn() as conn:
+        value = store.work(conn, project, planner)
+        value.checkpoint += " credential=private-test-key"
+        store.save_work(conn, project, planner, value)
+    http.put(f"/projects/{project}/status", headers=OPERATOR, json={"status": "stopped"}).raise_for_status()
+    loop = DispatcherLoop.__new__(DispatcherLoop)
+    loop.client = Client(http)
+    loop.config = SimpleNamespace(local=LocalConfig(workspace_root=str(tmp_path / "data")),
+        runtime=SimpleNamespace(execution="local", max_workers=1, max_project_workers=1, max_running_projects=1),
+        workers=[WorkerConfig(name="strong", type="claudecode", roles=["planner"], tier="strong",
+                              max_running=1, priority=0, env={"ANTHROPIC_AUTH_TOKEN": "private-test-key"})])
+    loop.futures, loop.runtime_project_ids, loop._log_state = {}, set(), {}
+    loop.project_cursor, loop.development = 0, None
+    # Record a submission without launching a model or modifying the user's repository.
+    loop.executor = SimpleNamespace(submit=lambda *args: Future())
+    caplog.set_level("INFO")
+    loop._dispatch_available(loop.client.list_projects())
+    assert "no active projects" in caplog.text
+    http.put(f"/projects/{project}/status", headers=OPERATOR, json={"status": "active"}).raise_for_status()
+    caplog.clear()
+    loop._dispatch_available(loop.client.list_projects())
+    assert "active projects=" in caplog.text and "state=waiting" in caplog.text
+    assert "unknown Cairn work keys/intent IDs: g15" in caplog.text and "retry_at=" in caplog.text
+    assert "private-test-key" not in caplog.text and "[redacted]" in caplog.text
+    assert not loop.futures
+    caplog.clear()
+    loop._dispatch_available(loop.client.list_projects())
+    assert not any(record.name.startswith("cairn.dispatcher") for record in caplog.records)
+    with db.get_conn() as conn:
+        value = store.work(conn, project, planner)
+        value.retry_at = "2000-01-01T00:00:00Z"
+        store.save_work(conn, project, planner, value)
+    loop._dispatch_available(loop.client.list_projects())
+    assert len(loop.futures) == 1
+    assert "Development task started" in caplog.text and f"intent={planner}" in caplog.text
+
+
 class GitHubTransport:
     """Only GitHub HTTP/CLI is simulated; all Git refs, pushes, merges and checks are real."""
     def __init__(self, bare, directory, original):

@@ -115,8 +115,12 @@ def validate_plan(conn, project_id, outcome):
             if prior.state not in ("verified", "superseded") or prior.key != proposed.key:
                 raise ValueError("A revision must explicitly supersede a completed work package with the same key")
     for key, deps in dependencies.items():
-        if key in deps or deps - set(keys) - existing:
-            raise ValueError(f"Invalid dependencies for {key}")
+        if key in deps:
+            raise ValueError(f"Invalid dependencies for {key}: a work package cannot depend on itself")
+        unknown = deps - set(keys) - existing
+        if unknown:
+            raise ValueError(f"Invalid dependencies for {key}: unknown Cairn work keys/intent IDs: {', '.join(sorted(unknown))}. "
+                             "Repository checklist entries are not registered Cairn work; describe already completed prerequisites in scope instead")
     prior = dict(all_work(conn, project_id))
     owners = {w.key: i for i, w in prior.items() if w.key and w.state != "superseded"}
     aliases = {**{i: i for i in prior}, **owners}

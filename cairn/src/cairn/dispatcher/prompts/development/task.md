@@ -27,7 +27,14 @@ Do not repeat completed work keys or external operations merely because context 
 Role rules:
 - planner: inspect the current repository/design and verified work; propose bounded
   work packages with stable keys, scope, acceptance, runnable argv check commands and
-  dependencies (other work keys or existing intent IDs). Do not implement code. If the
+  dependencies (keys proposed in this plan or existing Cairn work keys/intent IDs
+  from work-index.json). Repository checklist labels, requirement IDs and Git commits
+  are not Cairn dependency IDs. For prerequisites already present in the repository,
+  inspect their evidence and describe the baseline in scope; do not invent completed
+  Cairn tasks or repeat their implementation. Use [] when no Cairn dependency exists.
+  affected contains only existing Cairn intent IDs; addressed_controls contains only
+  hint IDs from current_controls that this plan actually incorporates. Use [] when
+  none apply; cite repository documents in summary/scope instead. Do not implement code. If the
   work needs a shared database, fixed port or other exclusive host resource, declare
   stable names in resources (for example tcp:127.0.0.1:5432); prefer isolated per-work
   resources. Claims serialize equal names across projects, including review/checks.
