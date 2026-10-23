@@ -217,6 +217,60 @@ def test_resume_dispatch_reports_rejected_plan_wait_and_restarts_when_due(http, 
     assert "Development task started" in caplog.text and f"intent={planner}" in caplog.text
 
 
+@pytest.mark.parametrize("legacy", [False, True])
+def test_rejected_plan_is_supplied_to_retry_then_passes_independent_review(http, tmp_path, legacy):
+    from cairn.dispatcher.development import DevelopmentDispatcher
+    from cairn.dispatcher.config import LocalConfig, WorkerConfig
+    from cairn.server import db, development_store as store
+    from test_development_api import create, claim
+    from test_development_workflow import advance, finish, plan, works
+
+    project_id, intent_id = create(http, tmp_path)
+    candidate = plan()
+    candidate["work"][0]["dependencies"] = ["g15"]
+    rejected = finish(http, project_id, intent_id, candidate, "planner")
+    value = works(http, project_id)[intent_id]
+    assert "output" not in value["result"] and "source_run_id" not in value["result"]
+    assert value["result"]["validation_feedback"]["output"] == candidate
+    with db.get_conn() as conn:
+        stored = store.work(conn, project_id, intent_id)
+        stored.retry_at = "2000-01-01T00:00:00Z"
+        if legacy:
+            stored.result.pop("validation_feedback")
+            stored.checkpoint = "Invalid result: Invalid dependencies for api"
+        store.save_work(conn, project_id, intent_id, stored)
+    response = claim(http, project_id, intent_id)
+    assert response.status_code == 200, response.text
+    retry = response.json()
+    client = Client(http)
+    project = client.get_project(project_id)
+    intent = next(i for i in project.intents if i.id == intent_id)
+    dispatcher = DevelopmentDispatcher(SimpleNamespace(client=client,
+        config=SimpleNamespace(local=LocalConfig(workspace_root=str(tmp_path / "data")))))
+    worker = WorkerConfig(name="strong", type="claudecode", roles=["planner"], tier="strong", max_running=1, priority=0)
+    context = json.loads(dispatcher.context(project, intent, client.development(project_id).data,
+        tmp_path / "retry", retry, tmp_path, worker).read_text(encoding="utf-8"))
+    assert context["retry_feedback"]["run_id"] == rejected["id"]
+    assert context["retry_feedback"]["output"] == candidate
+    assert "Invalid dependencies for api" in context["retry_feedback"]["error"]
+    # Model output is simulated here; the real reducer still gates the corrected plan on independent review.
+    corrected = json.loads(json.dumps(context["retry_feedback"]["output"]))
+    corrected["work"][0]["dependencies"] = []
+    http.post(f"/projects/{project_id}/development/runs/{retry['id']}/finish", headers=WORKER,
+        json={"token": retry["token"], "outcome": "success", "result": {"output": corrected}}).raise_for_status()
+    advance(http, project_id)
+    values = works(http, project_id)
+    assert values[intent_id]["state"] == "reviewing"
+    assert "validation_feedback" not in values[intent_id]["result"]
+    assert not any(w["role"] == "implementer" for w in values.values())
+    reviewer = next(i for i, w in values.items() if w["role"] == "architect")
+    finish(http, project_id, reviewer, {"kind": "review", "verdict": "approve", "summary": "Checked baseline and repaired plan"}, "architect")
+    values = works(http, project_id)
+    assert len([w for w in values.values() if w["role"] == "implementer"]) == 2
+    assert next(w for w in values.values() if w["key"] == "api")["dependencies"] == []
+    assert not any(w["key"] == "g15" for w in values.values())
+
+
 class GitHubTransport:
     """Only GitHub HTTP/CLI is simulated; all Git refs, pushes, merges and checks are real."""
     def __init__(self, bare, directory, original):

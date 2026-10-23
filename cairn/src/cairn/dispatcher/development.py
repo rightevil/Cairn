@@ -191,10 +191,23 @@ class DevelopmentDispatcher:
         hints = [{"id": h.id, "content": h.content, "control": h.control.model_dump(mode="json")}
                  for h in project.hints if h.control and h.control.state in ("accepted", "applied", "experiment", "completed")]
         candidate = next((h.content for h in project.hints if h.id == intent.work.subject), None)
+        feedback = intent.work.result.get("validation_feedback")
+        if feedback is None and intent.work.checkpoint.startswith("Invalid result:"):
+            # Reconstruct feedback for rejections recorded before it was stored on the work package.
+            previous = next((r for r in self.call(project.project.id, f"intents/{intent.id}/runs")
+                if r["state"] == "success" and r["applied"] and r["revision"] == intent.work.revision
+                and r["id"] != intent.work.result.get("source_run_id")), None)
+            if previous:
+                feedback = {"run_id": previous["id"], "revision": previous["revision"],
+                    "error": intent.work.checkpoint.removeprefix("Invalid result: "),
+                    "output": previous["result"].get("output", previous["result"])}
+        if feedback and feedback["revision"] != intent.work.revision:
+            feedback = None
         context = {
             "project": project.project.model_dump(mode="json"),
             "goal": next(f.description for f in project.facts if f.id == "goal"),
             "work_package": {"id": intent.id, "description": intent.description, **intent.work.model_dump(mode="json")},
+            "retry_feedback": feedback,
             "current_controls": hints,
             "raw_evidence": evidence,
             "work_index_path": str(directory / "work-index.json"),

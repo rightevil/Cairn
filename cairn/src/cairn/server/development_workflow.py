@@ -495,8 +495,11 @@ def advance(conn, project_id):
             except (ValueError, KeyError, HTTPException) as exc:
                 conn.execute("ROLLBACK TO apply_result")
                 value = store.work(conn, project_id, run["intent_id"])
-                retry(conn, project_id, run["intent_id"], value, "Invalid result: " + str(exc))
-                store.event(conn, project_id, "result_rejected", run["id"], str(exc))
+                error = str(exc.detail) if isinstance(exc, HTTPException) else str(exc)
+                value.result["validation_feedback"] = {"run_id": run["id"], "revision": run["revision"],
+                    "error": error, "output": run_result(run).get("output", run_result(run))}
+                retry(conn, project_id, run["intent_id"], value, "Invalid result: " + error)
+                store.event(conn, project_id, "result_rejected", run["id"], error)
             finally:
                 conn.execute("RELEASE apply_result")
         elif run["state"] != "superseded":
