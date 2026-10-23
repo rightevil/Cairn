@@ -32,6 +32,29 @@ def test_claude_structured_result_failure_and_session():
         driver.extract_response_text(json.dumps({"type": "result", "is_error": True, "result": "quota exceeded"}), "")
 
 
+def test_claude_development_execute_and_resume_share_cairn_system_contract(tmp_path):
+    prompt = tmp_path / "system-prompt.md"
+    prompt.write_text("Cairn prompt for this run", encoding="utf-8")
+    role = worker(env={"CAIRN_SYSTEM_PROMPT_FILE": str(prompt)})
+    driver = ClaudeCodeDriver()
+    for argv in (driver.build_execute(role, "task", "session-1").argv,
+                 driver.build_conclude(role, "continue", "session-1")):
+        assert "--safe-mode" in argv
+        assert argv[argv.index("--setting-sources") + 1] == ""
+        assert argv[argv.index("--system-prompt-file") + 1] == str(prompt)
+        assert argv[argv.index("--append-subagent-system-prompt-file") + 1] == str(prompt)
+        assert argv[argv.index("--system-prompt-snapshot") + 1] == "off"
+        assert "--dangerously-skip-permissions" in argv
+        assert argv[-2:] == ["--", "task" if "--session-id" in argv else "continue"]
+
+
+def test_claude_exploration_keeps_its_existing_harness_defaults():
+    role = WorkerConfig(name="explore", type="claudecode", task_types=["explore"], max_running=1, priority=0)
+    driver = ClaudeCodeDriver()
+    for argv in (driver.build_execute(role, "task", "session").argv, driver.build_conclude(role, "task", "session")):
+        assert "--safe-mode" not in argv and "--system-prompt-file" not in argv
+
+
 def test_local_codex_provider_and_model_survive_execute_and_resume():
     role = worker("codex", model="configured-model", env={"CODEX_BASE_URL": "http://localhost:9999/v1", "OPENAI_API_KEY": "not-a-real-key"})
     driver = CodexDriver(local=True)

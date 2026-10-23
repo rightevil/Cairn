@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from importlib import resources
 
 from cairn.dispatcher.config import WorkerConfig
 from cairn.dispatcher.workers.base import DriverResult, SeedSessionDriver
@@ -37,6 +38,16 @@ class ClaudeCodeDriver(SeedSessionDriver):
     def describe_health(self, worker: WorkerConfig) -> str:
         return f"POST {worker.env['ANTHROPIC_BASE_URL']}/v1/messages (model={worker.env['ANTHROPIC_MODEL']})"
 
+    @staticmethod
+    def _development_args(worker: WorkerConfig) -> list[str]:
+        if not worker.roles:
+            return []
+        prompt = worker.env.get("CAIRN_SYSTEM_PROMPT_FILE") or str(
+            resources.files("cairn.dispatcher.prompts").joinpath("development", "system.md"))
+        return ["--safe-mode", "--setting-sources", "", "--system-prompt-file", prompt,
+                "--append-subagent-system-prompt-file", prompt, "--system-prompt-snapshot", "off",
+                "--output-format", "json"]
+
     def build_execute(self, worker: WorkerConfig, prompt: str, session: str | None) -> DriverResult:
         assert session is not None
         return DriverResult(
@@ -46,7 +57,7 @@ class ClaudeCodeDriver(SeedSessionDriver):
                 session,
                 "--dangerously-skip-permissions",
                 "-p",
-                *(["--output-format", "json"] if worker.roles else []),
+                *self._development_args(worker),
                 "--",
                 prompt,
             ],
@@ -60,7 +71,7 @@ class ClaudeCodeDriver(SeedSessionDriver):
             session,
             "--dangerously-skip-permissions",
             "-p",
-            *(["--output-format", "json"] if worker.roles else []),
+            *self._development_args(worker),
             "--",
             prompt,
         ]

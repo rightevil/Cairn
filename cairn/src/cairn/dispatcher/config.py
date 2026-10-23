@@ -48,7 +48,8 @@ DEFAULT_PROMPT_REQUIRED_TOKENS: dict[str, tuple[str, ...]] = {
 }
 
 PROMPT_REQUIRED_TOKENS_BY_GROUP: dict[str, dict[str, tuple[str, ...]]] = {
-    "development": {"task.md": ("{role}", "{context_path}", "{checkpoint_path}", "{result_schema}")},
+    "development": {"task.md": ("{role}", "{context_path}", "{checkpoint_path}", "{result_schema}"),
+                    "system.md": ("Cairn development worker",)},
     "mock": {
         "reason.md": ("{fact_ids}", "{open_intents}", "{max_intents}"),
         "explore.md": ("{intent_id}",),

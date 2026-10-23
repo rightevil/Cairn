@@ -227,6 +227,13 @@ c=json.loads(Path(os.environ["CAIRN_CONTEXT_PATH"]).read_text(encoding="utf-8"))
 w=c["work_package"]
 assert "CAIRN_OPERATOR_TOKEN" not in os.environ
 assert "CAIRN_WORKER_TOKEN" not in os.environ
+assert c["execution"]["role"]==w["role"]
+assert c["execution"]["worker_type"]=="claudecode"
+assert "--safe-mode" in sys.argv
+system=Path(os.environ["CAIRN_SYSTEM_PROMPT_FILE"])
+assert system.parent.name==os.environ["CAIRN_RUN_ID"]
+assert sys.argv[sys.argv.index("--system-prompt-file")+1]==str(system)
+assert "Cairn development worker" in system.read_text(encoding="utf-8")
 if w["role"]=="planner":
     verified=any(x["role"]=="implementer" and x["state"]=="verified" for x in c["recent_work"].values())
     if verified:
@@ -285,6 +292,9 @@ print(json.dumps({"type":"result","session_id":"session-"+os.environ["CAIRN_RUN_
     assert implementation.work.merge_commit
     assert implementation.work.pr_url.endswith("/pull/1")
     assert current.project.development.state == "completed"
+    state = loop.client.development(project).data
+    assert any(Path(e["path"]).name == "system-prompt.md" for r in state["runs"] for e in r["evidence"])
+    assert all("CAIRN_SYSTEM_PROMPT_FILE" not in w.env for w in loop.config.workers)
     # A lost merge receipt must reconcile the existing PR, not create or merge it again.
     manager = GitWorkspace(current.project.development, tmp_path / "data", project)
     reconciled, evidence = manager.integrate(implementation.id, implementation.work, tmp_path / "reconcile-run", TaskCancellation())

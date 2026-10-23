@@ -161,7 +161,7 @@ class DevelopmentDispatcher:
             LOG.warning("Development dispatch deferred project=%s detail=%s", summary.id, exc)
             return False
 
-    def context(self, project, intent, state, directory, run, workspace):
+    def context(self, project, intent, state, directory, run, workspace, worker):
         known = {i.id: i.work.model_dump(mode="json") for i in project.intents if i.work}
         atomic_json(directory / "work-index.json", known)
         subject = next((i for i in project.intents if i.id == intent.work.subject), None)
@@ -192,6 +192,9 @@ class DevelopmentDispatcher:
             "subject": {"id": subject.id, "description": subject.description, "work": subject.work.model_dump(mode="json")} if subject else None,
             "suggestion_candidate": candidate,
             "working_directory": str(workspace),
+            "execution": {"worker_type": worker.type, "tier": worker.tier, "role": intent.work.role,
+                          "requested_model": worker.model or worker.env.get({"claudecode": "ANTHROPIC_MODEL", "codex": "CODEX_MODEL", "pi": "PI_MODEL"}.get(worker.type, "")),
+                          "platform": os.name, "run_id": run["id"], "run_directory": str(directory)},
             "checkpoint_path": str(directory / "checkpoint.json"),
             "operation_cli": "cairn operation reserve --key KEY --kind KIND --request-file FILE; cairn operation record --key KEY --state done --resource-id ID --evidence TEXT",
         }
@@ -261,14 +264,20 @@ class DevelopmentDispatcher:
                     commit = subject.work.head_commit if subject and intent.work.purpose == "implementation" else None
                     worktree = repository.snapshot(run["id"], commit)
                 frozen_commit = git(worktree, "rev-parse", "HEAD")
-                context_path = self.context(project, intent, state, directory, run, worktree)
+                context_path = self.context(project, intent, state, directory, run, worktree, worker)
                 template = resources.files("cairn.dispatcher.prompts").joinpath("development", "task.md").read_text(encoding="utf-8")
                 prompt = template.replace("{role}", intent.work.role).replace("{context_path}", str(context_path)).replace(
                     "{checkpoint_path}", str(checkpoint)).replace("{result_schema}", json.dumps(DevelopmentOutcome.model_json_schema()))
                 driver = get_driver(worker.type, "local")
                 session = driver.prepare_session()
-                argv = executable_argv(worker, driver.build_execute(worker, prompt, session).argv)
-                env = {**worker.env, "CAIRN_CONTEXT_PATH": str(context_path), "CAIRN_CHECKPOINT_PATH": str(checkpoint),
+                run_worker = worker.model_copy(deep=True)
+                if worker.type == "claudecode":
+                    system = resources.files("cairn.dispatcher.prompts").joinpath("development", "system.md").read_text(encoding="utf-8")
+                    artifact = write_artifact(directory, "system-prompt.md", system, kind="artifact")
+                    evidence.append(artifact)
+                    run_worker.env["CAIRN_SYSTEM_PROMPT_FILE"] = artifact.path
+                argv = executable_argv(run_worker, driver.build_execute(run_worker, prompt, session).argv)
+                env = {**run_worker.env, "CAIRN_CONTEXT_PATH": str(context_path), "CAIRN_CHECKPOINT_PATH": str(checkpoint),
                        "CAIRN_SERVER": self.config.server, "CAIRN_PROJECT_ID": project.project.id,
                        "CAIRN_RUN_ID": run["id"], "CAIRN_RUN_TOKEN": run["token"]}
                 process = self.loop.container_manager.build_exec_process(str(worktree), env, argv,
