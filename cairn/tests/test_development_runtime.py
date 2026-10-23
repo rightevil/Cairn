@@ -51,9 +51,13 @@ def test_owned_worktrees_keep_user_files_and_isolate_parallel_features(repositor
 def test_checks_record_real_failure_instead_of_accepting_worker_claim(repository, tmp_path):
     manager = GitWorkspace(DevelopmentProject(repository=str(repository), design="Build application"), tmp_path / "data", "proj_001")
     path = manager.snapshot("review")
-    passed, evidence = manager.checks(path, [[sys.executable, "-c", "raise SystemExit(7)"]], tmp_path / "artifacts", TaskCancellation())
+    passed, evidence = manager.checks(path, [[sys.executable, "-c", "raise SystemExit(7)"],
+        [sys.executable, "-c", "from pathlib import Path; Path('should-not-run').touch()"]], tmp_path / "artifacts", TaskCancellation())
     assert passed is False and evidence[0].exit_code == 7
     assert Path(evidence[0].path).is_file()
+    assert not (path / "should-not-run").exists()
+    reports = json.loads((tmp_path / "artifacts/check-summary.json").read_text(encoding="utf-8"))
+    assert len(reports) == 1 and reports[0]["exit_code"] == 7 and not reports[0]["passed"]
 
 
 def test_wrapper_refuses_to_commit_if_worker_switches_its_owned_branch(repository, tmp_path):
@@ -74,6 +78,20 @@ def test_successful_check_cannot_change_the_code_it_verifies(repository, tmp_pat
     path = manager.snapshot("review")
     passed, evidence = manager.checks(path, [[sys.executable, "-c", "from pathlib import Path; Path('README.md').write_text('changed')"]], tmp_path / "artifacts", TaskCancellation())
     assert passed is False and evidence[0].exit_code == 0
+    report = json.loads((tmp_path / "artifacts/check-summary.json").read_text(encoding="utf-8"))[0]
+    assert report["changed_tracked_files"] == ["README.md"] and not report["passed"]
+
+
+def test_check_artifacts_can_change_outside_the_tracked_source(repository, tmp_path):
+    manager = GitWorkspace(DevelopmentProject(repository=str(repository), design="Build application"), tmp_path / "data", "proj_001")
+    path = manager.snapshot("artifact-check")
+    artifact_dir = tmp_path / "artifacts"
+    passed, evidence = manager.checks(path, [[sys.executable, "-c",
+        "import os; from pathlib import Path; Path(os.environ['CAIRN_ARTIFACT_DIR'], 'dynamic.json').write_text('temporary evidence')"]],
+        artifact_dir, TaskCancellation())
+    assert passed and (artifact_dir / "dynamic.json").is_file()
+    assert not git(path, "status", "--porcelain")
+    assert any(Path(item.path).name == "check-summary.json" for item in evidence)
 
 
 def test_integration_sync_fast_forwards_both_sides_and_preserves_divergence(repository, tmp_path):
@@ -253,6 +271,10 @@ def test_rejected_plan_is_supplied_to_retry_then_passes_independent_review(http,
     assert context["retry_feedback"]["run_id"] == rejected["id"]
     assert context["retry_feedback"]["output"] == candidate
     assert "Invalid dependencies for api" in context["retry_feedback"]["error"]
+    history = json.loads(Path(context["attempt_history_path"]).read_text(encoding="utf-8"))
+    assert history[0]["run_id"] == rejected["id"] and history[0]["result"]["output"] == candidate
+    assert "token" not in history[0]
+    assert Path(context["progress_path"]).parent == tmp_path / "retry"
     # Model output is simulated here; the real reducer still gates the corrected plan on independent review.
     corrected = json.loads(json.dumps(context["retry_feedback"]["output"]))
     corrected["work"][0]["dependencies"] = []
@@ -269,6 +291,56 @@ def test_rejected_plan_is_supplied_to_retry_then_passes_independent_review(http,
     assert len([w for w in values.values() if w["role"] == "implementer"]) == 2
     assert next(w for w in values.values() if w["key"] == "api")["dependencies"] == []
     assert not any(w["key"] == "g15" for w in values.values())
+
+
+@pytest.mark.parametrize("role,kind,expected", [("implementer", "wait", "success"),
+    ("implementer", "needs_design", "success"), ("planner", "wait", "failed")])
+def test_dirty_checkpoint_is_allowed_for_implementation_but_not_readonly_roles(http, repository, tmp_path, role, kind, expected):
+    from cairn.dispatcher.development import DevelopmentDispatcher
+    from cairn.dispatcher.config import LocalConfig, WorkerConfig
+    from cairn.dispatcher.runtime.local_backend import LocalBackend
+    from test_development_api import claim
+    from test_development_workflow import approve_plan, advance, works
+
+    data = http.post("/projects", headers=OPERATOR, json={"title": "checkpoint", "origin": "existing code", "goal": "Build feature",
+        "development": {"repository": str(repository), "design": "Add the feature", "checks": [["git", "diff", "--check"]]}}).json()
+    project_id, intent_id = data["project"]["id"], data["intents"][0]["id"]
+    if role == "implementer":
+        approve_plan(http, project_id, intent_id)
+        intent_id = next(i for i, w in works(http, project_id).items() if w["key"] == "api")
+    run = claim(http, project_id, intent_id, role=role).json()
+    fake = tmp_path / "checkpoint-worker.py"
+    fake.write_text('''import json, os
+from pathlib import Path
+c = json.loads(Path(os.environ["CAIRN_CONTEXT_PATH"]).read_text(encoding="utf-8"))
+assert Path(c["attempt_history_path"]).is_file()
+Path("README.md").write_text("Uncommitted implementation checkpoint", encoding="utf-8")
+Path(c["progress_path"]).write_text(json.dumps({"next_step":"Resolve recorded blocker","checks":[]}), encoding="utf-8")
+print(json.dumps({"type":"result","result":json.dumps({"kind":"''' + kind + '''","summary":"Saved current work"})}))
+''', encoding="utf-8")
+    client = Client(http)
+    local = LocalConfig(workspace_root=str(tmp_path / "data"))
+    loop = SimpleNamespace(client=client, config=SimpleNamespace(server="in-process", local=local, runtime=SimpleNamespace(interval=1),
+        tasks=SimpleNamespace(development_timeout=10)), container_manager=LocalBackend(local))
+    dispatcher = DevelopmentDispatcher(loop)
+    project = client.get_project(project_id)
+    intent = next(i for i in project.intents if i.id == intent_id)
+    worker = WorkerConfig(name="checkpoint", type="claudecode", roles=[role], tier="strong" if role == "planner" else "standard",
+                          command=[sys.executable, str(fake)], max_running=1, priority=0)
+    assert dispatcher.execute(project, intent, worker, run, TaskCancellation()) == expected
+    result = client.development(project_id).data["runs"][0]
+    assert result["state"] == expected
+    assert result["result"]["snapshot"]["cli"]["exit_code"] == 0
+    if role == "implementer":
+        assert "changed tracked code" not in result["detail"]
+        assert any(Path(item["path"]).name == "progress.json" for item in result["evidence"])
+        worktree = tmp_path / "data" / project_id / "worktrees" / intent_id
+        assert (worktree / "README.md").read_text() == "Uncommitted implementation checkpoint"
+        assert git(worktree, "rev-parse", "HEAD") == git(repository, "rev-parse", "HEAD")
+        advance(http, project_id)
+        assert works(http, project_id)[intent_id]["state"] == ("waiting" if kind == "wait" else "reviewing")
+    else:
+        assert "Planning or review role changed tracked code" in result["detail"]
 
 
 class GitHubTransport:

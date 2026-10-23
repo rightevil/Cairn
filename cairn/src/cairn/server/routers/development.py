@@ -218,6 +218,8 @@ def claim(project_id: str, intent_id: str, body: RunClaim):
         allowed = ("approved", "merged") if body.phase == "integration" else ("ready", "waiting")
         if value.state not in allowed or (value.retry_at and value.retry_at > utcnow()):
             raise HTTPException(409, "Work package is not ready")
+        if value.state == "waiting" and value.result.get("wait_on"):
+            raise HTTPException(409, "Waiting for observed work to change; advance before claiming")
         if body.phase == "integration" and (value.role != "implementer" or not value.result.get("review")):
             raise HTTPException(409, "Integration requires a reviewed implementation")
         if body.phase == "integration" and value.result.get("pending_design"):

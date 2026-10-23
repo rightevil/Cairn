@@ -46,7 +46,7 @@ class ClaudeCodeDriver(SeedSessionDriver):
             resources.files("cairn.dispatcher.prompts").joinpath("development", "system.md"))
         return ["--safe-mode", "--setting-sources", "", "--system-prompt-file", prompt,
                 "--append-subagent-system-prompt-file", prompt, "--system-prompt-snapshot", "off",
-                "--output-format", "json"]
+                "--output-format", "stream-json", "--verbose"]
 
     def build_execute(self, worker: WorkerConfig, prompt: str, session: str | None) -> DriverResult:
         assert session is not None
@@ -77,20 +77,30 @@ class ClaudeCodeDriver(SeedSessionDriver):
         ]
 
 
-    def extract_session(self, session: str | None, stdout: str, stderr: str) -> str | None:
+    @staticmethod
+    def _final_result(stdout: str):
         try:
-            value = json.loads(stdout)
+            return json.loads(stdout)
         except ValueError:
-            return session
+            for line in reversed(stdout.splitlines()):
+                try:
+                    value = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(value, dict) and value.get("type") == "result":
+                    return value
+        return None
+
+    def extract_session(self, session: str | None, stdout: str, stderr: str) -> str | None:
+        value = self._final_result(stdout)
         return value.get("session_id", session) if isinstance(value, dict) else session
 
     def extract_response_text(self, stdout: str, stderr: str) -> str:
-        try:
-            value = json.loads(stdout)
-        except ValueError:
-            return stdout
+        value = self._final_result(stdout)
         if isinstance(value, dict) and value.get("type") == "result":
             if value.get("is_error"):
                 raise ValueError("Claude Code run reported an error: " + str(value.get("result", value.get("errors", "unknown"))))
             return value.get("result", "")
+        if any(line.startswith('{"type":') for line in stdout.splitlines()):
+            raise ValueError("Claude Code stream ended without a final result")
         return stdout

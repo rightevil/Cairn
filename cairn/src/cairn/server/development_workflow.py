@@ -322,6 +322,14 @@ def run_result(run):
     return json.loads(run["result"])
 
 
+def work_versions(conn, project_id, intent_ids):
+    versions = {}
+    for intent_id in intent_ids:
+        work = store.work(conn, project_id, intent_id)
+        versions[intent_id] = [work.state, work.revision, work.head_commit, work.merge_commit, work.result.get("source_run_id")]
+    return versions
+
+
 def apply_success(conn, project_id, run, value):
     result = run_result(run)
     outcome = DevelopmentOutcome.model_validate(result.get("output", result))
@@ -332,7 +340,12 @@ def apply_success(conn, project_id, run, value):
         config = store.project(conn, project_id)
         value.waits += 1
         wake_at = outcome.wake_at
-        if wake_at is None and outcome.kind == "wait" and outcome.wait_for == "external":
+        if outcome.kind == "wait" and outcome.wait_for == "work":
+            if not outcome.wait_on or run["intent_id"] in outcome.wait_on:
+                raise ValueError("A work wait requires other existing Cairn intent IDs in wait_on")
+            value.result["wait_on"] = work_versions(conn, project_id, outcome.wait_on)
+            wake_at = None
+        elif wake_at is None and outcome.kind == "wait" and outcome.wait_for == "external":
             wake_at = (datetime.now(timezone.utc) + timedelta(seconds=min(3600, 60 * 2 ** min(value.waits - 1, 6)))).isoformat(timespec="seconds").replace("+00:00", "Z")
         value.state, value.retry_at = "waiting", wake_at
         if value.role == "planner":
@@ -509,6 +522,16 @@ def advance(conn, project_id):
         conn.execute("UPDATE runs SET applied=1 WHERE id=?", (run["id"],))
     checkpoint(conn, project_id)
     config = store.project(conn, project_id)
+    for intent_id, value in all_work(conn, project_id):
+        observed = value.result.get("wait_on")
+        if value.state == "waiting" and observed and work_versions(conn, project_id, observed) != observed:
+            value.state, value.retry_at = "ready", None
+            value.result.pop("wait_on")
+            store.save_work(conn, project_id, intent_id, value)
+            store.event(conn, project_id, "work_wait_resolved", intent_id, "Observed work changed; reevaluate the saved checkpoint")
+            if value.role == "planner":
+                config.state, config.wait_reason, config.wake_at = "active", "", None
+                store.save_project(conn, project_id, config)
     work = all_work(conn, project_id)
     verified_count = sum(w.role == "implementer" and w.state == "verified" for _, w in work)
     if config.state == "active" and verified_count - config.direction_checkpoint >= config.direction_review_every and not conn.execute(

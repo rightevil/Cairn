@@ -23,7 +23,8 @@ def test_claude_structured_result_failure_and_session():
     driver = ClaudeCodeDriver()
     role = worker(model="configured-standard-model")
     argv = driver.build_execute(role, "prompt", "session-1").argv
-    assert ["--output-format", "json"] == argv[argv.index("--output-format"):argv.index("--output-format") + 2]
+    assert ["--output-format", "stream-json"] == argv[argv.index("--output-format"):argv.index("--output-format") + 2]
+    assert "--verbose" in argv
     assert role.env["ANTHROPIC_MODEL"] == "configured-standard-model"
     raw = json.dumps({"type": "result", "session_id": "session-1", "result": '{"kind":"implemented","summary":"done"}'})
     assert driver.extract_session(None, raw, "") == "session-1"
@@ -45,7 +46,23 @@ def test_claude_development_execute_and_resume_share_cairn_system_contract(tmp_p
         assert argv[argv.index("--append-subagent-system-prompt-file") + 1] == str(prompt)
         assert argv[argv.index("--system-prompt-snapshot") + 1] == "off"
         assert "--dangerously-skip-permissions" in argv
+        assert argv[argv.index("--output-format") + 1] == "stream-json" and "--verbose" in argv
         assert argv[-2:] == ["--", "task" if "--session-id" in argv else "continue"]
+
+
+def test_claude_stream_uses_final_result_and_rejects_incomplete_or_error_stream():
+    driver = ClaudeCodeDriver()
+    events = [json.dumps({"type": "system", "session_id": "session-2"}),
+              json.dumps({"type": "assistant", "message": {"content": "Still working"}})]
+    with pytest.raises(ValueError, match="without a final result"):
+        driver.extract_response_text("\n".join(events), "")
+    events.append(json.dumps({"type": "result", "session_id": "session-2", "result": '{"kind":"wait","summary":"Saved checkpoint"}'}))
+    raw = "\n".join(events)
+    assert driver.extract_session(None, raw, "") == "session-2"
+    assert json.loads(driver.extract_response_text(raw, ""))["kind"] == "wait"
+    events[-1] = json.dumps({"type": "result", "is_error": True, "result": "429 quota exceeded"})
+    with pytest.raises(ValueError, match="reported an error"):
+        driver.extract_response_text("\n".join(events), "")
 
 
 def test_claude_exploration_keeps_its_existing_harness_defaults():

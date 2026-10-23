@@ -19,6 +19,20 @@ invent dependency IDs or mark old repository work as Cairn-verified to satisfy i
 Return a corrected result for the normal independent review; do not ask the user to
 fix a schema or dependency error that the supplied context lets you resolve.
 
+Read attempt_history_path before retrying. Previous exit causes, check reports, logs
+and progress files are evidence to reconcile with the actual worktree, not proof of
+completion. A CLI timed_out flag is a process time limit; unrecognized_model alone
+is a harness warning about a custom alias, not evidence the gateway failed. Do not
+restart a full suite on unchanged code and inputs merely because this is a new run.
+First resolve the recorded failing check, then run the relevant checks; final
+dispatcher checks and independent review still apply to the exact submitted commit.
+Maintain progress_path as a JSON handoff at phase changes and before long commands:
+record current diagnosis, changed files, commands, source/input identity, raw log
+paths, completed and failed checks, and the next concrete step. Keep output evidence
+in per-run paths, user://, or CAIRN_ARTIFACT_DIR when available; never overwrite a
+committed fixture or frozen evidence with changing timestamps, PIDs or temp paths.
+Check commands must leave tracked files and HEAD unchanged.
+
 Plan/design/architecture decisions belong to strong-model roles. Implementation
 belongs to ordinary-model workers. Implementers choose local code details freely
 within the approved work package; escalate design gaps with concrete evidence.
@@ -54,6 +68,10 @@ Role rules:
   Use wait_for=user only for a genuine missing user decision; external conditions
   use wait_for=external and a reliable wake_at when available. The dispatcher will
   recheck external waits with backoff, without inventing new work or a total budget.
+  When waiting for another Cairn task, use kind=wait, wait_for=work and wait_on with
+  the existing intent IDs (for example ["i005"]). No timer is needed: the server
+  wakes this work when those tasks materially change. Do not use external polling
+  to repeatedly investigate an implementation that is still running.
   Cite accepted suggestions incorporated by the plan in addressed_controls. Revisions
   of verified work must name the original intent ID in supersedes; reuse its stable
   work key only for an explicitly justified change, never for blind repetition.

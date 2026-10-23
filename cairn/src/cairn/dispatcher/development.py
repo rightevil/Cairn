@@ -203,11 +203,19 @@ class DevelopmentDispatcher:
                     "output": previous["result"].get("output", previous["result"])}
         if feedback and feedback["revision"] != intent.work.revision:
             feedback = None
+        attempts = [{"run_id": r["id"], "state": r["state"], "detail": r["detail"],
+            "result": r["result"], "evidence": r["evidence"],
+            "progress_path": str(self.directory / project.project.id / "runs" / r["id"] / "progress.json")}
+            for r in state["runs"] if r["intent_id"] == intent.id and r["id"] != run["id"]
+            and r["state"] != "running" and r["revision"] == intent.work.revision]
+        atomic_json(directory / "attempt-history.json", attempts)
         context = {
             "project": project.project.model_dump(mode="json"),
             "goal": next(f.description for f in project.facts if f.id == "goal"),
             "work_package": {"id": intent.id, "description": intent.description, **intent.work.model_dump(mode="json")},
             "retry_feedback": feedback,
+            "attempt_history_path": str(directory / "attempt-history.json"),
+            "progress_path": str(directory / "progress.json"),
             "current_controls": hints,
             "raw_evidence": evidence,
             "work_index_path": str(directory / "work-index.json"),
@@ -326,6 +334,9 @@ class DevelopmentDispatcher:
                 finally:
                     cancellation.attach_process(None)
                 evidence.extend([file_artifact(process.stdout_path), file_artifact(process.stderr_path)])
+                snapshot = {"requested_model": worker.model or worker.env.get({"claudecode": "ANTHROPIC_MODEL", "codex": "CODEX_MODEL", "pi": "PI_MODEL"}.get(worker.type, "")),
+                    "worker_type": worker.type, "tier": worker.tier,
+                    "cli": {"exit_code": result.returncode, "timed_out": result.timed_out, "cancelled": result.cancelled}}
                 session = driver.extract_session(session, result.stdout, result.stderr)
                 if result.cancelled or cancellation.is_cancelled:
                     outcome, detail = "cancelled", cancellation.reason or result.cancel_reason or "cancelled"
@@ -337,8 +348,6 @@ class DevelopmentDispatcher:
                     response = driver.extract_response_text(result.stdout, result.stderr)
                     parsed = DevelopmentOutcome.model_validate(parse_json_output(response))
                     output, outcome, detail = parsed.model_dump(mode="json"), "success", parsed.summary
-                    snapshot = {"requested_model": worker.model or worker.env.get({"claudecode": "ANTHROPIC_MODEL", "codex": "CODEX_MODEL", "pi": "PI_MODEL"}.get(worker.type, "")),
-                                "worker_type": worker.type, "tier": worker.tier}
                     if intent.work.role == "implementer" and parsed.kind == "implemented":
                         head = repository.commit_implementation(worktree, intent.id)
                         base = intent.work.base_commit
@@ -371,8 +380,12 @@ class DevelopmentDispatcher:
                             outcome, detail = "failed", "Independent acceptance checks failed"
                         elif intent.work.purpose == "milestone" and git(repository.repository, "rev-parse", f"refs/heads/{repository.branch}") != frozen_commit:
                             outcome, detail = "failed", "Integration branch advanced during milestone verification; recheck the new commit"
-                    elif git(worktree, "diff", frozen_commit, "--") or git(worktree, "rev-parse", "HEAD") != frozen_commit:
+                    elif intent.work.role != "implementer" and (git(worktree, "diff", frozen_commit, "--") or git(worktree, "rev-parse", "HEAD") != frozen_commit):
                         outcome, detail = "failed", "Planning or review role changed tracked code"
+            if (directory / "check-summary.json").is_file():
+                snapshot["checks"] = json.loads((directory / "check-summary.json").read_text(encoding="utf-8"))
+            if (directory / "progress.json").is_file():
+                evidence.append(file_artifact(directory / "progress.json", kind="artifact"))
         except IntegrationWait as exc:
             outcome, detail = "blocked", str(exc)
             retry_at = _after(30)

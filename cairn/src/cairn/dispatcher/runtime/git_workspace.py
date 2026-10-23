@@ -132,11 +132,14 @@ class GitWorkspace:
             raise GitError("Configure nonempty project or reviewed work-package check commands")
         evidence = []
         passed = True
+        reports = []
         frozen = git(path, "rev-parse", "HEAD")
         for index, argv in enumerate(commands):
             if cancellation.is_cancelled:
-                return False, evidence
+                passed = False
+                break
             env = {k: v for k, v in os.environ.items() if k.upper() not in ("CAIRN_OPERATOR_TOKEN", "CAIRN_WORKER_TOKEN")}
+            env["CAIRN_ARTIFACT_DIR"] = str(artifact_dir.resolve())
             process = LocalProcess(argv, str(path), env, timeout_seconds=self.config.check_timeout)
             artifact_dir.mkdir(parents=True, exist_ok=True)
             process.stdout_path = artifact_dir / f"check-{index}.stdout.log"
@@ -149,10 +152,17 @@ class GitWorkspace:
                 cancellation.attach_process(None)
             evidence.extend(file_artifact(log, kind="test", commit=frozen, command=argv, exit_code=result.returncode)
                             for log in (process.stdout_path, process.stderr_path))
-            passed = passed and result.returncode == 0 and not result.cancelled and not result.timed_out
-            passed = passed and git(path, "rev-parse", "HEAD") == frozen and not git(path, "diff", frozen, "--")
-            if cancellation.is_cancelled:
-                return False, evidence
+            head = git(path, "rev-parse", "HEAD")
+            changed = git(path, "diff", "--name-only", frozen, "--").splitlines()
+            passed = result.returncode == 0 and not result.cancelled and not result.timed_out and head == frozen and not changed
+            reports.append({"command": argv, "commit": frozen, "exit_code": result.returncode,
+                "timed_out": result.timed_out, "cancelled": result.cancelled,
+                "head_changed": head != frozen, "changed_tracked_files": changed, "passed": passed})
+            if not passed or cancellation.is_cancelled:
+                passed = False
+                break
+        if reports:
+            evidence.append(write_artifact(artifact_dir, "check-summary.json", json.dumps(reports, ensure_ascii=False, indent=2), kind="artifact"))
         return passed, evidence
 
     def check_commands(self, value: WorkPackage):

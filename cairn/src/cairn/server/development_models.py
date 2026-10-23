@@ -97,7 +97,8 @@ class DevelopmentOutcome(DevelopmentModel):
     verdict: Literal["approve", "request_changes", "needs_design", "reject", "defer", "experiment"] | None = None
     within_scope: bool = True
     wake_at: str | None = None
-    wait_for: Literal["external", "user"] = "external"
+    wait_for: Literal["external", "user", "work"] = "external"
+    wait_on: list[str] = Field(default_factory=list)
     project_complete: bool = False
     evidence: list[str] = Field(default_factory=list)
     affected: list[str] = Field(default_factory=list)

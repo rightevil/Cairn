@@ -136,6 +136,38 @@ def test_wait_is_legal_without_inventing_new_work(http, tmp_path):
     assert data["intents"][0]["work"]["retry_at"] is not None
 
 
+def test_internal_work_wait_has_no_timer_or_repeated_claim_and_wakes_on_change(http, tmp_path):
+    from cairn.server.development_workflow import ready_planner
+    project, original = create(http, tmp_path)
+    approve_plan(http, project, original)
+    with db.get_conn() as conn:
+        ready_planner(conn, project, "Wait for the existing implementation")
+    values = works(http, project)
+    planner = next(i for i, w in values.items() if w["role"] == "planner" and w["state"] == "ready")
+    implementation = next(i for i, w in values.items() if w["key"] == "api")
+    finish(http, project, planner, {"kind": "wait", "wait_for": "work", "wait_on": [implementation],
+                                   "summary": "Waiting for the existing implementation"}, "planner")
+    for _ in range(5):
+        advance(http, project)
+        value = works(http, project)[planner]
+        assert value["state"] == "waiting" and value["retry_at"] is None
+        assert claim(http, project, planner).status_code == 409
+    finish(http, project, implementation, {"kind": "needs_design", "summary": "Contract needs a design decision"}, "implementer")
+    value = works(http, project)[planner]
+    assert value["state"] == "ready" and "wait_on" not in value["result"]
+    assert claim(http, project, planner).status_code == 200
+
+
+@pytest.mark.parametrize("target", ["self", "missing"])
+def test_internal_wait_requires_other_existing_work(http, tmp_path, target):
+    project, planner = create(http, tmp_path)
+    finish(http, project, planner, {"kind": "wait", "wait_for": "work", "wait_on": [planner if target == "self" else "missing"],
+                                   "summary": "Invalid dependency"}, "planner")
+    value = works(http, project)[planner]
+    assert value["retry_at"] and "validation_feedback" in value["result"]
+    assert "wait_on" not in value["result"]
+
+
 def test_architecture_gap_is_sent_to_strong_role_while_other_work_remains_ready(http, tmp_path):
     project, planner = create(http, tmp_path)
     approve_plan(http, project, planner)
