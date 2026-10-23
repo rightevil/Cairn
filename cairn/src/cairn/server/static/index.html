@@ -596,6 +596,8 @@
               <h3 class="font-semibold text-sm">项目运行</h3>
               <p class="text-xs break-all" x-text="project.project.development.repository"></p>
               <p class="text-xs text-slate-500">集成分支：<span x-text="project.project.development.integration_branch || '首次执行时绑定当前分支'"></span></p>
+              <p class="text-xs text-slate-500">交付方式：<span x-text="project.project.development.delivery === 'local' ? '本地审查合并（不上传代码）' : 'GitHub PR'"></span></p>
+              <button x-show="operatorToken" @click="setDevelopmentDelivery(project.project.development.delivery === 'local' ? 'github' : 'local')" class="text-xs text-brand-600" x-text="project.project.development.delivery === 'local' ? '改为 GitHub PR 交付' : '改为本地审查合并'"></button>
               <p x-show="project.project.development.milestone" class="text-xs" x-text="'当前里程碑：' + project.project.development.milestone"></p>
               <details x-show="project.project.development.architecture" class="text-xs"><summary class="cursor-pointer text-teal-700" x-text="'已决定的设计 · v' + project.project.development.design_revision"></summary><p class="mt-2 whitespace-pre-wrap break-words" x-text="project.project.development.architecture"></p><p x-show="project.project.development.architecture_control_revision < project.project.development.revision" class="text-amber-700 mt-1">设计等待按当前指令复核。</p></details>
               <p class="text-xs" x-text="project.project.development.wait_reason || (project.project.status === 'stopped' ? '已暂停，保留当前工作' : project.project.status === 'completed' ? '项目已完成验证' : '按项目设计自主推进')"></p>
@@ -902,6 +904,7 @@
       <div x-show="newDevelopment.enabled" class="space-y-3">
         <label class="block text-xs text-slate-500">仓库绝对路径<input x-model="newDevelopment.repository" placeholder="项目仓库根目录的绝对路径" class="mt-1 w-full border rounded-lg p-2 text-sm"></label>
         <label class="block text-xs text-slate-500">集成分支（留空使用当前分支）<input x-model="newDevelopment.integration_branch" class="mt-1 w-full border rounded-lg p-2 text-sm"></label>
+        <label class="block text-xs text-slate-500">交付方式<select x-model="newDevelopment.delivery" class="mt-1 w-full border rounded-lg p-2 text-sm"><option value="github">GitHub PR（需要远端仓库）</option><option value="local">本地审查合并（不上传代码）</option></select></label>
         <label class="block text-xs text-slate-500">项目设计与范围（可从下方目标开始）<textarea x-model="newDevelopment.design" rows="3" class="mt-1 w-full border rounded-lg p-2 text-sm"></textarea></label>
         <label class="block text-xs text-slate-500">项目检查命令（可选，由规划者补充工作包检查）<textarea x-model="newDevelopment.checks" rows="2" placeholder='[["python", "-m", "pytest", "-q"]]' class="mt-1 w-full border rounded-lg p-2 font-mono text-xs"></textarea></label>
         <label class="block text-xs text-slate-500">操作令牌<input type="password" x-model="operatorToken" autocomplete="off" class="mt-1 w-full border rounded-lg p-2 text-sm"></label>
@@ -3428,7 +3431,7 @@ function cairnApp() {
         const data = await this.api('POST', '/projects', body);
         this.showNewProject = false;
         this.newProject = { title:'', origin:'', goal:'', bootstrap: true, hints: [{ content:'' }] };
-        this.newDevelopment = { enabled: true, repository: '', integration_branch: '', design: '', checks: '' };
+        this.newDevelopment = { enabled: true, repository: '', integration_branch: '', delivery: 'github', design: '', checks: '' };
         await this.loadProjects();
         await this.openProject(data.project.id);
         this.showToast('项目已创建');

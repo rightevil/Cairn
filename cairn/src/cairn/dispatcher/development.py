@@ -205,7 +205,8 @@ class DevelopmentDispatcher:
             feedback = None
         attempts = [{"run_id": r["id"], "state": r["state"], "detail": r["detail"],
             "result": r["result"], "evidence": r["evidence"],
-            "progress_path": str(self.directory / project.project.id / "runs" / r["id"] / "progress.json")}
+            "progress_path": str(self.directory / project.project.id / "runs" / r["id"] / "progress.json"),
+            "supervisor_handoff_path": str(self.directory / project.project.id / "runs" / r["id"] / "supervisor-handoff.json")}
             for r in self.call(project.project.id, f"intents/{intent.id}/runs") if r["id"] != run["id"]
             and r["state"] != "running" and r["revision"] == intent.work.revision]
         atomic_json(directory / "attempt-history.json", attempts)

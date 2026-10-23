@@ -5,6 +5,7 @@ import json
 import secrets
 import uuid
 import hashlib
+import os
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -14,12 +15,26 @@ from cairn.server.access import require_operator, require_reader, require_worker
 from cairn.server.db import get_conn
 from cairn.server.development_models import (
     Control, ControlRequest, DevelopmentProject, OperationRequest, OperationResult,
-    RunClaim, RunFinish, RunUpdate, WorkPackage, WorkspaceUpdate, RepositoryBinding, RecoveryRequest,
+    RunClaim, RunFinish, RunUpdate, WorkPackage, WorkspaceUpdate, RepositoryBinding, RecoveryRequest, DeliverySettings,
 )
 from cairn.server import development_store as store
 from cairn.server.services import get_project_or_404, next_hint_id, utcnow
 
 router = APIRouter(prefix="/projects/{project_id}/development", tags=["development"])
+
+
+@router.put("/delivery", dependencies=[Depends(require_operator)])
+def delivery(project_id: str, body: DeliverySettings):
+    with get_conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        config = store.project(conn, project_id)
+        if conn.execute("SELECT 1 FROM runs WHERE project_id=? AND role='integration' AND state='running'", (project_id,)).fetchone():
+            raise HTTPException(409, "Wait for the current integration before changing delivery mode")
+        if config.delivery != body.delivery:
+            config.delivery = body.delivery
+            store.save_project(conn, project_id, config)
+            store.event(conn, project_id, "delivery_configured", project_id, "Delivery mode: " + body.delivery)
+        return config
 
 
 @router.post("/advance", dependencies=[Depends(require_worker)])
@@ -228,6 +243,13 @@ def claim(project_id: str, intent_id: str, body: RunClaim):
             "SELECT 1 FROM runs WHERE project_id=? AND role='integration' AND state='running'", (project_id,)
         ).fetchone():
             raise HTTPException(409, "Another merge is in progress")
+        if body.phase == "integration":
+            repository = os.path.normcase(str(Path(config.repository).resolve()))
+            for row in conn.execute("SELECT p.development FROM runs r JOIN projects p ON p.id=r.project_id "
+                                    "WHERE r.role='integration' AND r.state='running'"):
+                other = DevelopmentProject.model_validate_json(row["development"])
+                if os.path.normcase(str(Path(other.repository).resolve())) == repository:
+                    raise HTTPException(409, "Another project is merging into this repository")
         for dependency in value.dependencies:
             if store.work(conn, project_id, dependency).state != "verified":
                 raise HTTPException(409, f"Dependency {dependency} is not verified")

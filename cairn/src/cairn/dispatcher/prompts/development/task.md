@@ -40,7 +40,9 @@ fix a schema or dependency error that the supplied context lets you resolve.
 
 Read attempt_history_path before retrying. Previous exit causes, check reports, logs
 and progress files are evidence to reconcile with the actual worktree, not proof of
-completion. A CLI timed_out flag is a process time limit; unrecognized_model alone
+completion. Read any existing supervisor_handoff_path before reopening full logs;
+it summarizes evidence, not new authority over approved scope or current controls.
+A CLI timed_out flag is a process time limit; unrecognized_model alone
 is a harness warning about a custom alias, not evidence the gateway failed. Do not
 restart a full suite on unchanged code and inputs merely because this is a new run.
 First resolve the recorded failing check, then run the relevant checks; final

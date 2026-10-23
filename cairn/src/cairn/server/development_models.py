@@ -34,6 +34,7 @@ class DevelopmentProject(DevelopmentModel):
     repository: str = Field(min_length=1)
     integration_branch: str = ""
     remote: str = "origin"
+    delivery: Literal["github", "local"] = "github"
     design: str = Field(min_length=1)
     architecture: str = ""
     design_revision: int = Field(default=1, ge=1)
@@ -179,6 +180,10 @@ class WorkspaceUpdate(RunUpdate):
 
 class RepositoryBinding(DevelopmentModel):
     integration_branch: str = Field(min_length=1)
+
+
+class DeliverySettings(DevelopmentModel):
+    delivery: Literal["github", "local"]
 
 
 class RecoveryRequest(DevelopmentModel):

@@ -32,3 +32,23 @@ assert(html.includes('最近心跳：') && html.includes('当前 Worker（'));
 assert(html.includes('run.worker') && html.includes('run.pid'));
 assert(!html.includes('formatTimelineDate(run.started_at)'));
 console.log('Development UI checks passed: revision phase, live workers, stop/stale/startup states and full timestamps');
+
+(async () => {
+  app.saveOperatorToken = () => {};
+  app.newProject = { goal: 'Deliver the application' };
+  app.newDevelopment.repository = path.resolve('test-app');
+  app.newDevelopment.delivery = 'local';
+  assert.equal(app.developmentConfiguration().delivery, 'local');
+  const calls = [];
+  app.selectedProjectId = 'proj_001';
+  app.api = async (...args) => calls.push(args);
+  app.loadProject = async id => calls.push(['reload', id]);
+  app.showToast = () => {};
+  await app.setDevelopmentDelivery('local');
+  assert.equal(calls[0][0], 'PUT');
+  assert.equal(calls[0][1], '/projects/proj_001/development/delivery');
+  assert.equal(calls[0][2].delivery, 'local');
+  assert.equal(calls[1][0], 'reload');
+  assert(html.includes('本地审查合并（不上传代码）'));
+  console.log('Delivery UI checks passed: explicit local selection and authenticated configuration request');
+})().catch(error => { console.error(error); process.exitCode = 1; });

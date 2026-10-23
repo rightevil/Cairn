@@ -228,6 +228,8 @@ class GitWorkspace:
             raise IntegrationWait("Integration checkout has uncommitted files; preserving them")
         if git(self.repository, "symbolic-ref", "--short", "HEAD") != self.branch:
             raise IntegrationWait("Integration checkout is on another branch; no automatic checkout performed")
+        if self.config.delivery == "local":
+            return self.integrate_local(intent_id, value, artifact_dir, cancellation, require_active)
         self.sync_integration(require_active)
         remote = self.config.remote
         remote_url = git(self.repository, "remote", "get-url", remote)
@@ -292,3 +294,54 @@ class GitWorkspace:
         return {"merge_commit": merged, "integration_commit": actual, "head_commit": head,
                 "pr_url": url, "checks_passed": passed and merged_base == base,
                 "review_base_changed": merged_base != base}, evidence
+
+    def integrate_local(self, intent_id, value, artifact_dir, cancellation, require_active):
+        review = value.result["review"]
+        head, base = review["commit"], review["base"]
+        for commit in (head, base):
+            if not re.fullmatch(r"[0-9a-fA-F]{40,64}", commit or "") or git(self.repository, "rev-parse", commit + "^{commit}") != commit:
+                raise GitError("Local integration requires exact reviewed commit IDs")
+        actual = git(self.repository, "rev-parse", "HEAD")
+        record = self.record(intent_id)
+        receipt = record.get("local_merge", {})
+        matches = receipt.get("head") == head and receipt.get("base") == base
+        merged = receipt.get("merge_commit") if matches else None
+        if matches and not merged and actual != base:
+            # Reconcile a crash after Git merged but before the receipt was saved.
+            for candidate in git(self.repository, "rev-list", "--first-parent", base + ".." + actual).splitlines():
+                if git(self.repository, "show", "-s", "--format=%P", candidate).split() == [base, head]:
+                    merged = candidate
+                    break
+        if merged:
+            if git(self.repository, "show", "-s", "--format=%P", merged).split() != [base, head]:
+                raise GitError("Saved local merge does not match the reviewed parents")
+            if command(["git", "-C", str(self.repository), "merge-base", "--is-ancestor", merged, actual], self.repository, check=False).returncode:
+                raise IntegrationWait("Recorded local merge is absent from the integration branch; reconcile history before retrying")
+        elif actual != base:
+            return {"needs_rebase": True, "detail": "Integration branch advanced; update implementation and review"}, []
+        elif head != base:
+            if not value.branch or git(self.repository, "rev-parse", "refs/heads/" + value.branch) != head:
+                raise GitError("Feature branch differs from the independently reviewed commit")
+            if command(["git", "-C", str(self.repository), "merge-base", "--is-ancestor", base, head], self.repository, check=False).returncode:
+                return {"needs_rebase": True, "detail": "Reviewed feature does not descend from its reviewed base"}, []
+            record["local_merge"] = {"head": head, "base": base}
+            self.save_record(intent_id, record)
+            require_active()
+            git(self.repository, "-c", "user.name=Cairn", "-c", "user.email=cairn@localhost", "merge", "--no-ff", "--no-edit",
+                "-m", f"Merge Cairn {self.directory.name}/{intent_id}", head)
+            merged = git(self.repository, "rev-parse", "HEAD")
+        else:
+            merged = head
+        if head != base:
+            record["local_merge"] = {"head": head, "base": base, "merge_commit": merged}
+            self.save_record(intent_id, record)
+        actual = git(self.repository, "rev-parse", "HEAD")
+        parents_match = head == base or git(self.repository, "show", "-s", "--format=%P", merged).split() == [base, head]
+        evidence = [write_artifact(artifact_dir, "local-merge.json", json.dumps({"delivery": "local", "intent_id": intent_id,
+            "review_run": review["run_id"], "reviewed_head": head, "reviewed_base": base,
+            "merge_commit": merged, "integration_commit": actual}, indent=2), kind="artifact", commit=actual)]
+        snapshot = self.snapshot("local-integration-" + artifact_dir.name, actual)
+        passed, checks = self.checks(snapshot, self.check_commands(value), artifact_dir, cancellation)
+        return {"delivery": "local", "merge_commit": merged, "integration_commit": actual, "head_commit": head,
+                "pr_url": None, "checks_passed": passed and parents_match,
+                "review_base_changed": not parents_match}, evidence + checks

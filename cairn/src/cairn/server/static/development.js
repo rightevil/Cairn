@@ -5,7 +5,7 @@ function developmentFeatures() {
     developmentError: '',
     developmentProjectId: '',
     developmentNow: Date.now(),
-    newDevelopment: { enabled: true, repository: '', integration_branch: '', design: '', checks: '' },
+    newDevelopment: { enabled: true, repository: '', integration_branch: '', delivery: 'github', design: '', checks: '' },
     developmentControl: { kind: 'suggestion', content: '', scope: '', replaces: '' },
     developmentArtifact: { open: false, name: '', text: '' },
 
@@ -25,7 +25,15 @@ function developmentFeatures() {
       }
       this.saveOperatorToken();
       return { repository: this.newDevelopment.repository.trim(), integration_branch: this.newDevelopment.integration_branch.trim(),
-        design: this.newDevelopment.design.trim() || this.newProject.goal, checks };
+        delivery: this.newDevelopment.delivery, design: this.newDevelopment.design.trim() || this.newProject.goal, checks };
+    },
+
+    async setDevelopmentDelivery(mode) {
+      try {
+        await this.api('PUT', `/projects/${this.selectedProjectId}/development/delivery`, { delivery: mode });
+        await this.loadProject(this.selectedProjectId);
+        this.showToast(mode === 'local' ? '已使用本地审查合并，不上传代码' : '已使用 GitHub PR 交付');
+      } catch (error) { this.showToast(error.message, 'error'); }
     },
 
     async loadDevelopment(id) {
@@ -88,6 +96,8 @@ function developmentFeatures() {
         'New user directive requires further work': '收到新用户指令，项目需要继续推进',
         'Included in an independently approved plan': '已纳入通过独立审查的计划',
         'Controls changed before result application': '应用结果前指令已变更，旧结果不再生效',
+        'Delivery mode: local': '交付方式已设为本地审查合并',
+        'Delivery mode: github': '交付方式已设为 GitHub PR',
         suggestion: '建议', directive: '用户指令',
       };
       if (fixed[text]) return fixed[text];

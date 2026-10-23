@@ -475,13 +475,20 @@ class GitHubTransport:
         return subprocess.CompletedProcess(argv, 0, json.dumps(payload), "")
 
 
-def test_real_subprocess_git_and_review_pipeline_reaches_verified_completion(http, repository, tmp_path, monkeypatch):
+@pytest.mark.parametrize("delivery", ["github", "local"])
+def test_real_subprocess_git_and_review_pipeline_reaches_verified_completion(http, repository, tmp_path, monkeypatch, delivery):
     bare = tmp_path / "remote.git"
     subprocess.run(["git", "clone", "--bare", str(repository), str(bare)], check=True, capture_output=True)
     git(repository, "remote", "add", "origin", str(bare))
     original_command, original_git = workspace_module.command, workspace_module.git
     transport = GitHubTransport(bare, tmp_path, original_command)
-    monkeypatch.setattr(workspace_module, "command", transport)
+    def delivery_command(argv, cwd, **kwargs):
+        if delivery == "local":
+            assert argv[0] != "gh"
+            assert not (argv[0] == "git" and any(arg in ("push", "fetch", "ls-remote") for arg in argv))
+        return transport(argv, cwd, **kwargs)
+
+    monkeypatch.setattr(workspace_module, "command", delivery_command)
 
     def network_url(repo, *args, **kwargs):
         if args == ("remote", "get-url", "origin"):
@@ -533,7 +540,7 @@ print(json.dumps({"type":"result","session_id":"session-"+os.environ["CAIRN_RUN_
     path = tmp_path / "dispatch.yaml"
     path.write_text(yaml.safe_dump(config), encoding="utf-8")
     project = http.post("/projects", headers=OPERATOR, json={"title": "project", "origin": "existing repository",
-        "goal": "Add the requested feature", "development": {"repository": str(repository), "design": "Only add feature.txt",
+        "goal": "Add the requested feature", "development": {"repository": str(repository), "delivery": delivery, "design": "Only add feature.txt",
             "checks": [[sys.executable, "-c", "from pathlib import Path; assert Path('feature.txt').read_text()=='implemented'"]]}}).json()["project"]["id"]
     loop = DispatcherLoop(path)
     loop.client.close()
@@ -555,11 +562,11 @@ print(json.dumps({"type":"result","session_id":"session-"+os.environ["CAIRN_RUN_
         loop.close()
     assert (repository / "feature.txt").read_text() == "implemented"
     assert git(repository, "branch", "--show-current") == "main"
-    assert transport.creates == transport.merges == 1
+    assert transport.creates == transport.merges == (1 if delivery == "github" else 0)
     implementation = next(i for i in current.intents if i.work.role == "implementer")
     assert implementation.work.state == "verified"
     assert implementation.work.merge_commit
-    assert implementation.work.pr_url.endswith("/pull/1")
+    assert implementation.work.pr_url.endswith("/pull/1") if delivery == "github" else implementation.work.pr_url is None
     assert current.project.development.state == "completed"
     state = loop.client.development(project).data
     assert any(Path(e["path"]).name == "system-prompt.md" for r in state["runs"] for e in r["evidence"])
@@ -568,4 +575,4 @@ print(json.dumps({"type":"result","session_id":"session-"+os.environ["CAIRN_RUN_
     manager = GitWorkspace(current.project.development, tmp_path / "data", project)
     reconciled, evidence = manager.integrate(implementation.id, implementation.work, tmp_path / "reconcile-run", TaskCancellation())
     assert reconciled["checks_passed"] and reconciled["merge_commit"] == implementation.work.merge_commit
-    assert evidence and transport.creates == transport.merges == 1
+    assert evidence and transport.creates == transport.merges == (1 if delivery == "github" else 0)
