@@ -343,6 +343,101 @@ print(json.dumps({"type":"result","result":json.dumps({"kind":"''' + kind + '''"
         assert "Planning or review role changed tracked code" in result["detail"]
 
 
+@pytest.mark.parametrize("purpose,verdict,within_scope,dirty,check_fails", [
+    ("implementation", "request_changes", True, False, True),
+    ("implementation", "reject", True, False, True),
+    ("implementation", "needs_design", True, False, True),
+    ("implementation", "wait", True, False, True),
+    ("implementation", "approve", False, False, True),
+    ("implementation", "approve", True, False, False),
+    ("implementation", "approve", True, False, True),
+    ("implementation", "request_changes", True, True, True),
+    ("milestone", "request_changes", True, False, True),
+    ("milestone", "approve", True, False, False),
+    ("milestone", "approve", True, False, True),
+])
+def test_only_in_scope_approval_runs_automatic_acceptance_checks(http, repository, tmp_path,
+        purpose, verdict, within_scope, dirty, check_fails):
+    from cairn.dispatcher.development import DevelopmentDispatcher
+    from cairn.dispatcher.config import LocalConfig, WorkerConfig
+    from cairn.dispatcher.runtime.local_backend import LocalBackend
+    from test_development_api import claim
+    from test_development_workflow import approve_plan, advance, finish, works
+
+    fail_flag = tmp_path / "fail-check"
+    checks = [[sys.executable, "-c", "import os; from pathlib import Path; "
+        "Path(os.environ['CAIRN_ARTIFACT_DIR'], 'acceptance-ran').touch(); "
+        f"raise SystemExit(7 if Path({str(fail_flag)!r}).exists() else 0)"]]
+    data = http.post("/projects", headers=OPERATOR, json={"title": "review checks", "origin": "existing code",
+        "goal": "Verify the feature", "development": {"repository": str(repository),
+        "design": "Only change README.md", "checks": checks}}).json()
+    project_id, planner = data["project"]["id"], data["intents"][0]["id"]
+    client = Client(http)
+    local = LocalConfig(workspace_root=str(tmp_path / "data"))
+    loop = SimpleNamespace(client=client, config=SimpleNamespace(server="in-process", local=local,
+        runtime=SimpleNamespace(interval=1), tasks=SimpleNamespace(development_timeout=10)),
+        container_manager=LocalBackend(local))
+    dispatcher = DevelopmentDispatcher(loop)
+    fake = tmp_path / "review-worker.py"
+    fake.write_text('''import json, os
+from pathlib import Path
+c = json.loads(Path(os.environ["CAIRN_CONTEXT_PATH"]).read_text(encoding="utf-8"))
+if c["work_package"]["role"] == "implementer":
+    Path("README.md").write_text("Implementation", encoding="utf-8")
+    result = {"kind":"implemented","summary":"Implementation ready"}
+else:
+    if os.environ["DIRTY_REVIEW"] == "1":
+        Path("README.md").write_text("Unauthorized review change", encoding="utf-8")
+    result = json.loads(os.environ["REVIEW_RESULT"])
+print(json.dumps({"type":"result","session_id":os.environ["CAIRN_RUN_ID"],"result":json.dumps(result)}))
+''', encoding="utf-8")
+    output = {"kind": "wait" if verdict == "wait" else "review", "summary": "Recorded review conclusion",
+              "within_scope": within_scope}
+    if verdict != "wait":
+        output["verdict"] = verdict
+
+    def execute(intent_id, role):
+        run = claim(http, project_id, intent_id, role=role).json()
+        project = client.get_project(project_id)
+        intent = next(i for i in project.intents if i.id == intent_id)
+        worker = WorkerConfig(name=role, type="claudecode", roles=[role],
+            tier="strong" if role == "architect" else "standard", command=[sys.executable, str(fake)],
+            env={"REVIEW_RESULT": json.dumps(output), "DIRTY_REVIEW": str(int(dirty))}, max_running=1, priority=0)
+        outcome = dispatcher.execute(project, intent, worker, run, TaskCancellation())
+        advance(http, project_id)
+        return run, outcome
+
+    if purpose == "implementation":
+        approve_plan(http, project_id, planner)
+        subject = next(i for i, w in works(http, project_id).items() if w["key"] == "api")
+        _, outcome = execute(subject, "implementer")
+        assert outcome == "success"
+    else:
+        subject = planner
+        finish(http, project_id, planner, {"kind": "complete", "summary": "Baseline satisfies the goal",
+            "project_complete": True}, "planner")
+    review = next(i for i, w in works(http, project_id).items() if w["purpose"] == purpose and w["subject"] == subject)
+    role = works(http, project_id)[review]["role"]
+    if check_fails:
+        fail_flag.touch()
+    run, outcome = execute(review, role)
+    artifact_dir = tmp_path / "data" / project_id / "runs" / run["id"]
+    checks_required = verdict == "approve" and within_scope
+    assert (artifact_dir / "acceptance-ran").exists() == checks_required
+    assert (artifact_dir / "check-summary.json").exists() == checks_required
+    assert outcome == ("failed" if dirty or checks_required and check_fails else "success")
+    values = works(http, project_id)
+    if checks_required and not check_fails:
+        assert values[subject]["state"] == ("approved" if purpose == "implementation" else "verified")
+        result = next(r for r in client.development(project_id).data["runs"] if r["id"] == run["id"])
+        assert result["result"]["snapshot"]["checks_passed"]
+        assert any(e["kind"] == "test" for e in result["evidence"])
+    else:
+        assert values[subject]["state"] not in ("approved", "verified")
+        if not dirty and not checks_required:
+            assert values[review]["state"] == ("waiting" if verdict == "wait" else "verified")
+
+
 class GitHubTransport:
     """Only GitHub HTTP/CLI is simulated; all Git refs, pushes, merges and checks are real."""
     def __init__(self, bare, directory, original):

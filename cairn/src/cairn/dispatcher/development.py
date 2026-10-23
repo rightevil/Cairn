@@ -219,7 +219,10 @@ class DevelopmentDispatcher:
             "current_controls": hints,
             "raw_evidence": evidence,
             "work_index_path": str(directory / "work-index.json"),
-            "recent_work": {k: v for k, v in list(known.items())[-50:]},
+            "recent_work": {k: {field: v[field] for field in (
+                "key", "role", "state", "revision", "design_revision", "purpose", "subject",
+                "dependencies", "resources", "head_commit", "merge_commit")}
+                for k, v in list(known.items())[-50:]},
             "operations": state["operations"],
             "subject": {"id": subject.id, "description": subject.description, "work": subject.work.model_dump(mode="json")} if subject else None,
             "suggestion_candidate": candidate,
@@ -361,7 +364,8 @@ class DevelopmentDispatcher:
                             outcome, detail = "failed", "Implementation checks failed; see raw check logs"
                         elif git(worktree, "diff", "HEAD", "--") or git(worktree, "rev-parse", "HEAD") != head:
                             outcome, detail = "failed", "Check commands changed committed source; commit and recheck the actual result"
-                    elif intent.work.role in ("reviewer", "architect") and intent.work.purpose in ("implementation", "milestone"):
+                    elif (intent.work.role in ("reviewer", "architect") and intent.work.purpose in ("implementation", "milestone")
+                          and parsed.kind == "review" and parsed.verdict == "approve" and parsed.within_scope):
                         subject = next(i for i in project.intents if i.id == intent.work.subject)
                         commands = repository.check_commands(subject.work)
                         if intent.work.purpose == "milestone":
