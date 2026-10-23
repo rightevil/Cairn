@@ -4,6 +4,7 @@ import os
 
 import click
 import uvicorn
+from pydantic import ValidationError
 
 from cairn.dispatcher.logging import configure_logging
 from cairn.dispatcher.scheduler.loop import DispatcherLoop
@@ -64,12 +65,18 @@ def serve(host: str, port: int, db_path: str, log_level: str, access_log: bool):
 def dispatch(config_path: Path, once: bool, startup_healthcheck_only: bool, log_level: str):
     """Run the Cairn dispatcher."""
     configure_logging(log_level, bare=startup_healthcheck_only)
-    loop = DispatcherLoop(config_path)
     try:
+        loop = DispatcherLoop(config_path)
         if startup_healthcheck_only:
             loop.run_startup_healthchecks_only()
             return
         loop.run(once=once)
+    except ValidationError as exc:
+        details = "\n".join(
+            f"  {'.'.join(map(str, error['loc']))}: {error['msg']}"
+            for error in exc.errors(include_input=False, include_context=False, include_url=False)
+        )
+        raise click.ClickException(f"配置文件无效：{config_path}\n{details}") from None
     except RuntimeError as exc:
         raise click.ClickException(str(exc)) from exc
 

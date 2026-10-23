@@ -48,3 +48,22 @@ def test_startup_healthcheck_failure_summary_includes_worker_details() -> None:
     assert summary == (
         "startup healthchecks failed for all workers: worker-a(http=401, detail=unauthorized)"
     )
+
+
+def test_dispatch_config_error_is_readable_and_does_not_print_secret_inputs(tmp_path, monkeypatch):
+    import yaml
+    from click.testing import CliRunner
+    from cairn.cli import main
+    from conftest import make_config
+    monkeypatch.setattr("cairn.cli.configure_logging", lambda *args, **kwargs: None)
+    monkeypatch.delenv("http://127.0.0.1:3425", raising=False)
+    payload = make_config().model_dump()
+    payload["workers"][0]["env"]["ANTHROPIC_AUTH_TOKEN"] = "do-not-print-private-key"
+    payload["workers"][0]["env_from"] = {"ANTHROPIC_BASE_URL": "http://127.0.0.1:3425"}
+    path = tmp_path / "dispatch.yaml"
+    path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    result = CliRunner().invoke(main, ["dispatch", "--config", str(path)])
+    assert result.exit_code == 1
+    assert "env.ANTHROPIC_BASE_URL" in result.output and "workers.0" in result.output
+    assert "do-not-print-private-key" not in result.output
+    assert "input_value=" not in result.output and "Traceback" not in result.output

@@ -211,7 +211,10 @@ class WorkerConfig(BaseModel):
             raise ValueError("command must be a nonempty argv prefix")
         for target, source in self.env_from.items():
             if source not in os.environ:
-                raise ValueError(f"worker {self.name} requires environment variable {source}")
+                raise ValueError(
+                    f"worker {self.name}: env_from.{target} must name an existing environment variable; "
+                    f"put literal URLs, credentials or model IDs in env.{target}, not env_from"
+                )
             self.env[target] = os.environ[source]
         if self.model:
             key = {"claudecode": "ANTHROPIC_MODEL", "codex": "CODEX_MODEL", "pi": "PI_MODEL"}.get(self.type)

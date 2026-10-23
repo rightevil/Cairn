@@ -2,6 +2,12 @@
 # Set MAGPIE_ANTHROPIC_BASE_URL, MAGPIE_API_KEY, MAGPIE_STRONG_MODEL,
 # MAGPIE_STANDARD_MODEL in the dispatcher's environment. No keys are stored here.
 # Use the actual endpoint/model IDs configured in Magpie; do not append /v1/messages.
+# env_from values are ENVIRONMENT VARIABLE NAMES, not URLs or model IDs.
+# To write literal values, replace env_from with env, for example:
+# env:
+#   ANTHROPIC_BASE_URL: 'http://127.0.0.1:3425'
+#   ANTHROPIC_AUTH_TOKEN: 'your-magpie-key'
+#   ANTHROPIC_MODEL: 'group/your-model-id'
 server: http://127.0.0.1:8000
 
 runtime:

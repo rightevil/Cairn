@@ -147,3 +147,30 @@ def test_cli_probe_runs_the_resolved_native_prefix(monkeypatch):
     path, runnable = loop.DispatcherLoop._probe_local_cli(("node.exe", "/CLI with spaces/cli.js"))
     assert runnable and path == "node.exe"
     assert observed == [["node.exe", "/CLI with spaces/cli.js", "--help"]]
+
+
+@pytest.mark.parametrize("model", ["group/cairn-strong", "MiniMax-M3", "workbuddy/deepseek-v4.1-flash"])
+def test_literal_yaml_provider_values_do_not_require_environment_variables(tmp_path, monkeypatch, model):
+    import yaml
+    from cairn.dispatcher.config import DispatchConfig
+    path = Path(__file__).resolve().parents[2] / "dispatch.example.yaml"
+    payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+    for entry in payload["workers"]:
+        for name in entry.pop("env_from").values():
+            monkeypatch.delenv(name, raising=False)
+        entry["env"] = {"ANTHROPIC_BASE_URL": "http://127.0.0.1:3425", "ANTHROPIC_AUTH_TOKEN": "local-test-only",
+                        "ANTHROPIC_MODEL": model}
+    direct = tmp_path / "direct.yaml"
+    direct.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    config = DispatchConfig.load(direct)
+    assert all(w.env["ANTHROPIC_MODEL"] == model for w in config.workers)
+    assert all(w.env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:3425" for w in config.workers)
+
+
+def test_literal_env_from_has_an_actionable_error_without_echoing_its_value(monkeypatch):
+    monkeypatch.delenv("http://127.0.0.1:3425", raising=False)
+    with pytest.raises(ValidationError) as error:
+        worker(env_from={"ANTHROPIC_BASE_URL": "http://127.0.0.1:3425"})
+    message = error.value.errors(include_input=False)[0]["msg"]
+    assert "env.ANTHROPIC_BASE_URL" in message and "not env_from" in message
+    assert "http://127.0.0.1:3425" not in message
