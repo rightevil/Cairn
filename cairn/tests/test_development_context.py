@@ -44,7 +44,8 @@ def test_context_keeps_full_current_evidence_without_inlining_unrelated_history(
         assert len(path.read_bytes()) < len(json.dumps(large_result)) // 10
 
 
-def test_attempt_history_survives_project_run_list_pagination(http, tmp_path):
+@pytest.mark.parametrize("current_revision", [1, 2])
+def test_attempt_history_survives_project_run_list_pagination(http, tmp_path, current_revision):
     project_id, planner = create(http, tmp_path)
     previous = claim(http, project_id, planner).json()
     http.post(f"/projects/{project_id}/development/runs/{previous['id']}/finish", headers=WORKER,
@@ -53,6 +54,9 @@ def test_attempt_history_survives_project_run_list_pagination(http, tmp_path):
     client = Client(http)
     project = client.get_project(project_id)
     intent = next(i for i in project.intents if i.id == planner)
+    intent.work.revision = current_revision
+    intent.work.result["validation_feedback"] = {"run_id": previous["id"], "revision": 1,
+        "error": "Prior validation error", "output": {"summary": "Prior candidate"}}
     dispatcher = DevelopmentDispatcher(SimpleNamespace(client=client,
         config=SimpleNamespace(local=LocalConfig(workspace_root=str(tmp_path / "data")))))
     state = client.development(project_id).data
@@ -62,6 +66,11 @@ def test_attempt_history_survives_project_run_list_pagination(http, tmp_path):
     context = json.loads(path.read_text(encoding="utf-8"))
     history = json.loads((path.parent / "attempt-history.json").read_text(encoding="utf-8"))
     assert history[0]["run_id"] == previous["id"]
+    assert history[0]["revision"] == 1
     assert history[0]["result"]["next_step"] == "Repair the targeted check"
     assert history[0]["detail"] == "Preserved diagnosis"
     assert "token" not in history[0]
+    if current_revision == 1:
+        assert context["retry_feedback"]["error"] == "Prior validation error"
+    else:
+        assert context["retry_feedback"] is None

@@ -203,12 +203,12 @@ class DevelopmentDispatcher:
                     "output": previous["result"].get("output", previous["result"])}
         if feedback and feedback["revision"] != intent.work.revision:
             feedback = None
-        attempts = [{"run_id": r["id"], "state": r["state"], "detail": r["detail"],
+        attempts = [{"run_id": r["id"], "revision": r["revision"], "state": r["state"], "detail": r["detail"],
             "result": r["result"], "evidence": r["evidence"],
             "progress_path": str(self.directory / project.project.id / "runs" / r["id"] / "progress.json"),
             "supervisor_handoff_path": str(self.directory / project.project.id / "runs" / r["id"] / "supervisor-handoff.json")}
             for r in self.call(project.project.id, f"intents/{intent.id}/runs") if r["id"] != run["id"]
-            and r["state"] != "running" and r["revision"] == intent.work.revision]
+            and r["state"] != "running"]
         atomic_json(directory / "attempt-history.json", attempts)
         context = {
             "project": project.project.model_dump(mode="json"),
