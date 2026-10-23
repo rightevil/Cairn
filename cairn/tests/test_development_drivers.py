@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
@@ -99,3 +100,50 @@ def test_pi_local_provider_uses_native_argv_and_private_model_file(tmp_path, mon
     assert argv[0] == "pi" and "/bin/sh" not in argv and "--provider" in argv
     model_file = Path(role.env["PI_CODING_AGENT_DIR"]) / "models.json"
     assert json.loads(model_file.read_text())["providers"]["cairn"]["baseUrl"] == "http://localhost:9999/v1"
+
+
+@pytest.mark.parametrize("native", [True, False])
+def test_windows_claude_npm_shim_resolves_native_and_legacy_installs(tmp_path, monkeypatch, native):
+    from cairn.dispatcher import development
+    shim = tmp_path / "claude.CMD"
+    package = tmp_path / "node_modules/@anthropic-ai/claude-code"
+    package.mkdir(parents=True)
+    legacy = package / "cli.js"
+    legacy.touch()
+    executable = package / "bin/claude.exe"
+    if native:
+        executable.parent.mkdir()
+        executable.touch()
+    monkeypatch.setattr(development, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(development.shutil, "which", lambda name: str(shim) if name == "claude" else "node.exe")
+    arguments = ["claude", "-p", "--", '中文 prompt & %PATH% "quoted"']
+    resolved = development.executable_argv(worker(), arguments)
+    assert resolved == ([str(executable)] if native else ["node.exe", str(legacy)]) + arguments[1:]
+
+
+def test_unrecognized_windows_cli_install_fails_at_startup(tmp_path, monkeypatch):
+    from cairn.dispatcher import development
+    from cairn.dispatcher.scheduler.loop import DispatcherLoop
+    shim = tmp_path / "claude.cmd"
+    monkeypatch.setattr(development, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(development.shutil, "which", lambda name: str(shim))
+    loop = DispatcherLoop.__new__(DispatcherLoop)
+    loop.config = SimpleNamespace(workers=[worker()])
+    with pytest.raises(RuntimeError, match="Cannot resolve native CLI"):
+        loop._run_local_binary_check()
+
+
+def test_explicit_native_cli_command_keeps_the_original_prompt():
+    from cairn.dispatcher.development import executable_argv
+    role = worker(command=["/custom/claude.exe"])
+    assert executable_argv(role, ["claude", "-p", "--", "prompt"]) == ["/custom/claude.exe", "-p", "--", "prompt"]
+
+
+def test_cli_probe_runs_the_resolved_native_prefix(monkeypatch):
+    from cairn.dispatcher.scheduler import loop
+    observed = []
+    monkeypatch.setattr(loop.shutil, "which", lambda binary: binary)
+    monkeypatch.setattr(loop.subprocess, "run", lambda argv, **kw: observed.append(argv) or SimpleNamespace(returncode=0))
+    path, runnable = loop.DispatcherLoop._probe_local_cli(("node.exe", "/CLI with spaces/cli.js"))
+    assert runnable and path == "node.exe"
+    assert observed == [["node.exe", "/CLI with spaces/cli.js", "--help"]]

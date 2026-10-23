@@ -38,12 +38,21 @@ def executable_argv(worker, argv):
         return [*worker.command, *argv[1:]]
     executable = shutil.which(argv[0])
     if os.name == "nt" and executable and Path(executable).suffix.lower() in (".cmd", ".bat"):
-        packages = {"claudecode": "@anthropic-ai/claude-code/cli.js", "codex": "@openai/codex/bin/codex.js", "pi": "@mariozechner/pi-coding-agent/dist/cli.js"}
-        entry = Path(executable).parent / "node_modules" / packages.get(worker.type, "missing")
-        node = shutil.which("node")
-        if entry.is_file() and node:
-            return [node, str(entry), *argv[1:]]
-        raise RuntimeError("Set worker.command to the native executable or node CLI entry; batch shims are not used for prompts")
+        packages = {
+            "claudecode": ("@anthropic-ai/claude-code/bin/claude.exe", "@anthropic-ai/claude-code/cli.js"),
+            "codex": ("@openai/codex/bin/codex.js",),
+            "pi": ("@mariozechner/pi-coding-agent/dist/cli.js",),
+        }
+        for relative in packages.get(worker.type, ()):
+            entry = Path(executable).parent / "node_modules" / relative
+            if not entry.is_file():
+                continue
+            if entry.suffix.lower() == ".exe":
+                return [str(entry), *argv[1:]]
+            node = shutil.which("node")
+            if node:
+                return [node, str(entry), *argv[1:]]
+        raise RuntimeError(f"Cannot resolve native CLI behind {executable}; set worker.command to the native executable or Node entry")
     return argv
 
 
@@ -344,6 +353,13 @@ class DevelopmentDispatcher:
                 outcome = "cancelled"
             if outcome == "capacity":
                 retry_at = retry_at or capacity_retry_at(detail) or _after(60)
+            if outcome != "success":
+                diagnostic = detail
+                for key, value in (worker.env.items() if worker else ()):
+                    if value and any(secret in key.upper() for secret in ("KEY", "TOKEN", "PASSWORD", "SECRET")):
+                        diagnostic = diagnostic.replace(value, "[redacted]")
+                LOG.warning("Development run ended project=%s intent=%s run=%s outcome=%s detail=%s logs=%s",
+                            project.project.id, intent.id, run["id"], outcome, " ".join(diagnostic.split())[-1000:], directory)
             payload = {"token": run["token"], "outcome": outcome, "session": session,
                        "result": {"output": output, "snapshot": snapshot},
                        "evidence": [e.model_dump(mode="json") for e in evidence],

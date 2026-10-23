@@ -140,21 +140,26 @@ class DispatcherLoop:
         self._startup_healthchecks_checked = True
 
     def _run_local_binary_check(self) -> None:
-        binaries: dict[str, list[str]] = {}
+        binaries: dict[tuple[str, ...], list[str]] = {}
         for worker in self.config.workers:
             binary = worker.command[0] if worker.command else get_driver(worker.type, "local").local_binary()
             if binary is None:
                 continue
-            binaries.setdefault(binary, []).append(worker.name)
+            argv = [binary]
+            if worker.roles and shutil.which(binary):
+                from cairn.dispatcher.development import executable_argv
+                argv = executable_argv(worker, argv)
+            binaries.setdefault(tuple(argv), []).append(worker.name)
         if not binaries:
             return
 
         LOG.info("[*] Local execution: checking %d worker CLI(s) on this host", len(binaries))
         available: list[str] = []
         missing: list[str] = []
-        for binary in sorted(binaries):
-            workers = ", ".join(sorted(binaries[binary]))
-            path, runnable = self._probe_local_cli(binary)
+        for argv in sorted(binaries):
+            binary = argv[0]
+            workers = ", ".join(sorted(binaries[argv]))
+            path, runnable = self._probe_local_cli(argv)
             if path is None:
                 missing.append(binary)
                 LOG.error("[-] %-8s not found on PATH (workers: %s)", binary, workers)
@@ -168,7 +173,7 @@ class DispatcherLoop:
         if not available:
             raise RuntimeError(
                 "local execution: none of the configured worker CLIs are installed on PATH ("
-                + ", ".join(sorted(binaries))
+                + ", ".join(argv[0] for argv in sorted(binaries))
                 + "). Install them and make sure each runs directly from your shell, then retry."
             )
         if missing:
@@ -176,20 +181,20 @@ class DispatcherLoop:
                 "[!] Missing CLIs, their workers cannot run: %s. Install them or drop those workers.",
                 ", ".join(sorted(missing)),
             )
-        LOG.warning(
-            "[!] Local mode uses each CLI's own host config: make sure %s already logged in / "
-            "configured and usable directly; worker-specific model/provider environment overrides are applied.",
+        LOG.info(
+            "Local workers use host CLI configuration plus model/provider overrides: %s. "
+            "CLI discovery does not verify model connectivity.",
             ", ".join(sorted(available)),
         )
 
     @staticmethod
-    def _probe_local_cli(binary: str) -> tuple[str | None, bool]:
-        path = shutil.which(binary)
+    def _probe_local_cli(argv: tuple[str, ...]) -> tuple[str | None, bool]:
+        path = shutil.which(argv[0])
         if path is None:
             return None, False
         try:
             result = subprocess.run(
-                [binary, "--help"],
+                [path, *argv[1:], "--help"],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 timeout=15,

@@ -4,6 +4,7 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+from types import SimpleNamespace
 
 from pydantic import TypeAdapter
 import pytest
@@ -142,6 +143,30 @@ class Client:
         url = f"/projects/{project}/development" + ("/" + action if action else "")
         response = self.http.get(url, headers=WORKER) if payload is None else self.http.post(url, headers=WORKER, json=payload)
         return ApiResult(response.status_code, response.json(), response.text)
+
+
+def test_development_failure_log_shows_reason_and_artifact_path_without_credentials(http, tmp_path, monkeypatch, caplog):
+    from cairn.dispatcher import development
+    from cairn.dispatcher.config import LocalConfig, WorkerConfig
+    from test_development_api import create, claim
+    project_id, intent_id = create(http, tmp_path)
+    client = Client(http)
+    project = client.get_project(project_id)
+    intent = next(i for i in project.intents if i.id == intent_id)
+    run = claim(http, project_id, intent_id).json()
+    loop = SimpleNamespace(client=client, config=SimpleNamespace(local=LocalConfig(workspace_root=str(tmp_path / "data")),
+                           runtime=SimpleNamespace(interval=1)))
+    dispatcher = development.DevelopmentDispatcher(loop)
+    role = WorkerConfig(name="strong", type="claudecode", roles=["planner"], tier="strong", max_running=1,
+                        priority=0, env={"ANTHROPIC_AUTH_TOKEN": "private-test-key"})
+
+    def failed_repository(*args):
+        raise RuntimeError("Native CLI failed; credential=private-test-key")
+
+    monkeypatch.setattr(development, "GitWorkspace", failed_repository)
+    assert dispatcher.execute(project, intent, role, run, TaskCancellation()) == "failed"
+    assert "Native CLI failed" in caplog.text and run["id"] in caplog.text and "logs=" in caplog.text
+    assert "private-test-key" not in caplog.text and "[redacted]" in caplog.text
 
 
 class GitHubTransport:

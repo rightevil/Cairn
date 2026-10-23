@@ -39,7 +39,7 @@ workers:
       ANTHROPIC_BASE_URL: MAGPIE_ANTHROPIC_BASE_URL
       ANTHROPIC_AUTH_TOKEN: MAGPIE_API_KEY
       ANTHROPIC_MODEL: MAGPIE_STRONG_MODEL
-    # Windows: npm .cmd shims are resolved to their Node entry automatically.
+    # Windows: npm .cmd shims resolve to the native .exe or legacy Node entry.
     # For another installation, set a native argv prefix with absolute paths:
 
   - name: standard-development
