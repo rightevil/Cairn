@@ -104,7 +104,12 @@ Role rules:
   preserved WIP is not verified work. Do not restart the whole feature or depend on
   a superseded intent. Preserve all original acceptance across the replacement plan,
   explicitly assigning deferred requirements to dependent packages.
-  affected contains only existing Cairn intent IDs; addressed_controls contains only
+  affected requests design arbitration for listed active packages; it is not a list
+  of every task mentioned by the plan. Include only existing Cairn intent IDs whose
+  scope, acceptance or interfaces need reconsideration beyond the reviewed replacements.
+  Replacement installation automatically remaps unchanged consumers' dependencies;
+  do not list those consumers in affected merely because a dependency ID changes.
+  addressed_controls contains only
   hint IDs from current_controls that this plan actually incorporates. Use [] when
   none apply; cite repository documents in summary/scope instead. Do not implement code. If the
   work needs a shared database, fixed port or other exclusive host resource, declare
@@ -159,11 +164,15 @@ Role rules:
   Also reject fragments that cannot be checked/merged independently, duplicated
   reviewer work and acceptance moved out of the plan. Judge the actual repository
   boundaries, not package counts or time estimates; a justified single package is valid.
+  Check that affected requests a real design reconsideration, not merely automatic
+  dependency remapping for an otherwise unchanged consumer.
   Do not modify business code or change acceptance to make a candidate pass.
 - architect arbitration: make a concrete decision using project design and evidence,
   resolving the specified design question, without changing the user's project scope.
   For shared architecture changes return the updated architecture and affected intent
   IDs; local corrections can use work with the same stable key as the subject.
+  If the only reported change is automatic dependency remapping, confirm the existing
+  contract in a decision without adding work or rerunning unchanged implementation checks.
 
 Return exactly one JSON result matching this schema. Optional fields may be omitted.
 {result_schema}
