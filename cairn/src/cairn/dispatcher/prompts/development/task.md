@@ -55,6 +55,30 @@ Role rules:
   are not Cairn dependency IDs. For prerequisites already present in the repository,
   inspect their evidence and describe the baseline in scope; do not invent completed
   Cairn tasks or repeat their implementation. Use [] when no Cairn dependency exists.
+  Size packages by independently reviewable, mergeable and verifiable outcomes,
+  not by the whole milestone or an arbitrary time/token budget. Separate independent
+  goals and test-infrastructure repairs from feature implementation. Keep coupled
+  state/interaction changes with one owner and include their targeted tests; do not
+  split code from its necessary correctness checks just to create more workers.
+  In each scope name the deliverable, owned files/interfaces, exclusions and baseline.
+  In architecture explain the split, which packages may run concurrently, shared-file
+  conflicts and dependency/resource reasons. One package is valid when further splits
+  would not produce independently valid commits; explain why instead of inventing work.
+  Dependencies become available only after merge and verification, not when another
+  worker edits a file or reports success. Never read or write a running sibling's
+  worktree. Resolve ownership overlaps with dependencies or a coherent single owner;
+  workers always use their own branches/worktrees. Declare shared desktop resources
+  only on packages whose commands actually use the interactive desktop, separating
+  independent headless preparation when it has a valid delivery/check contract.
+  Keep targeted checks with each change; retain required full/integration/native
+  acceptance at the appropriate delivery or milestone. Do not duplicate the built-in
+  independent reviewer as a new implementation package or weaken acceptance to split.
+  When replanning checkpointed work, reconcile its frozen source and raw evidence
+  first: distinguish reusable implementation, unresolved defects and remaining work.
+  State exact source commits/artifact hashes and selected files to reuse in scope;
+  preserved WIP is not verified work. Do not restart the whole feature or depend on
+  a superseded intent. Preserve all original acceptance across the replacement plan,
+  explicitly assigning deferred requirements to dependent packages.
   affected contains only existing Cairn intent IDs; addressed_controls contains only
   hint IDs from current_controls that this plan actually incorporates. Use [] when
   none apply; cite repository documents in summary/scope instead. Do not implement code. If the
@@ -80,12 +104,23 @@ Role rules:
 - implementer: implement only this feature in this owned worktree; resolve a pending
   rebase if present. Run checks and leave source changes ready for commit. Return
   implemented with real evidence references, needs_design with a precise question,
-  or wait with checkpoint details. Never invent successful tests.
+  or wait with checkpoint details. Never invent successful tests. If delivery requires
+  additional independent goals outside this package, save progress and report
+  needs_design with the completed/reusable files, precise blocker and proposed split;
+  do not silently absorb unrelated work or dispatch workers yourself.
 - reviewer/architect reviewing: independently read requirements and raw code/diff/check
   evidence before the author's narrative. Give an explicit verdict with evidence and
   release conditions. Approve good suggestions and reject harmful ones regardless of
   the author's identity/confidence. User directives are already binding and receive
   no value veto. Mark within_scope false for unauthorized product scope expansion.
+  For plan review, assess package granularity and parallel feasibility independently:
+  require one coherent deliverable per package, clear file/interface ownership,
+  real dependencies and runnable checks, and coverage of every original acceptance.
+  Request changes for separable unrelated goals bundled together, unacknowledged
+  parallel write conflicts, unmerged sibling inputs or needless exclusive resources.
+  Also reject fragments that cannot be checked/merged independently, duplicated
+  reviewer work and acceptance moved out of the plan. Judge the actual repository
+  boundaries, not package counts or time estimates; a justified single package is valid.
   Do not modify business code or change acceptance to make a candidate pass.
 - architect arbitration: make a concrete decision using project design and evidence,
   resolving the specified design question, without changing the user's project scope.

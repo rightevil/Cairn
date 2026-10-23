@@ -7,8 +7,8 @@ from cairn.server.development_models import WorkPackage
 from test_development_api import OPERATOR, WORKER, claim, create, http
 
 
-def finish(http, project, intent, output, role, **extra):
-    run = claim(http, project, intent, role=role).json()
+def finish(http, project, intent, output, role, revision=1, **extra):
+    run = claim(http, project, intent, role=role, revision=revision).json()
     response = http.post(f"/projects/{project}/development/runs/{run['id']}/finish", headers=WORKER,
                          json={"token": run["token"], "outcome": "success", "result": {"output": output, **extra}})
     assert response.status_code == 200, response.text
@@ -113,6 +113,49 @@ def test_directives_apply_after_checkpoint_and_queue_new_revision(http, tmp_path
     assert data["project"]["development"]["revision"] == 2
     assert data["hints"][0]["control"]["state"] == "applied"
     assert any(w["work"]["role"] == "planner" and w["work"]["revision"] == 2 and w["work"]["state"] == "ready" for w in data["intents"])
+
+
+def test_checkpointed_package_can_be_replanned_as_independent_deliveries(http, tmp_path):
+    project, planner = create(http, tmp_path)
+    approve_plan(http, project, planner)
+    original = next(i for i, w in works(http, project).items() if w["key"] == "api")
+    with db.get_conn() as conn:
+        old = store.work(conn, project, original)
+        old.branch, old.worktree = "cairn/original", str(tmp_path / "original")
+        old.checkpoint = "Preserved source and evidence; not yet verified"
+        store.save_work(conn, project, original, old)
+    http.post(f"/projects/{project}/development/controls", headers=OPERATOR,
+              json={"kind": "directive", "scope": [original], "content": "Split remaining work using the saved checkpoint"}).raise_for_status()
+    advance(http, project)
+    values = works(http, project)
+    assert values[original]["state"] == "superseded"
+    assert values[original]["branch"] == "cairn/original"
+    assert values[original]["worktree"] == str(tmp_path / "original")
+    assert values[original]["checkpoint"] == "Preserved source and evidence; not yet verified"
+    replacement = next(i for i, w in values.items() if w["role"] == "planner" and w["state"] == "ready")
+    candidate = {"kind": "plan", "summary": "Core and isolated fixtures in parallel, then native acceptance",
+                 "work": [{"key": "api", "description": "Deliver API from checkpoint", "scope": "Reuse preserved API source",
+                           "acceptance": ["Targeted API checks pass"]},
+                          {"key": "fixtures", "description": "Isolate test data", "scope": "Independent test fixtures only",
+                           "acceptance": ["Fixtures are isolated"]},
+                          {"key": "native", "description": "Deliver native acceptance coverage", "scope": "Native harness only",
+                           "acceptance": ["Native checks pass"], "dependencies": ["api", "fixtures"],
+                           "resources": ["desktop:windows-interactive"]}]}
+    finish(http, project, replacement, candidate, "planner", revision=2)
+    values = works(http, project)
+    assert not any(w["key"] == "fixtures" for w in values.values())
+    review = next(i for i, w in values.items() if w["subject"] == replacement and w["purpose"] == "plan")
+    finish(http, project, review, {"kind": "review", "verdict": "approve", "summary": "Ownership, preserved acceptance and dependencies checked"}, "architect", revision=2)
+    values = works(http, project)
+    api = next(i for i, w in values.items() if w["key"] == "api" and w["state"] != "superseded")
+    fixtures = next(i for i, w in values.items() if w["key"] == "fixtures")
+    native = next(i for i, w in values.items() if w["key"] == "native")
+    ui = next(i for i, w in values.items() if w["key"] == "ui")
+    assert values[ui]["dependencies"] == [api]
+    assert values[native]["dependencies"] == [api, fixtures]
+    assert claim(http, project, api, role="implementer", revision=2).status_code == 200
+    assert claim(http, project, fixtures, role="implementer", revision=2).status_code == 200
+    assert claim(http, project, native, role="implementer", revision=2).status_code == 409
 
 
 def test_bad_user_suggestion_can_be_rejected_and_never_becomes_a_directive(http, tmp_path):
