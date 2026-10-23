@@ -144,7 +144,10 @@ Role rules:
   editing, run the affected checks; do not loop through full regression suites while
   a known targeted failure remains. Repeat an unchanged check only to test a named
   flakiness hypothesis with a stated stopping condition and recorded outcome.
-  Before returning implemented, run the required package acceptance. The dispatcher
+  Before returning implemented, run the required package acceptance for the executable
+  changes and fixtures. If only documentation changes after a passing run, verify its
+  references and source identities instead of repeating the suite just to refresh report
+  prose or audit metadata; cite the actual tested source/input identity honestly. The dispatcher
   will independently check the committed candidate; do not rerun an already passing
   sequence on unchanged inputs merely to produce another equivalent log. Never run native GUI
   checks from a package without its declared interactive-desktop resource.
