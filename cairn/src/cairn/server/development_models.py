@@ -86,7 +86,7 @@ class PlannedWork(DevelopmentModel):
     scope: str = Field(min_length=1)
     acceptance: list[str] = Field(min_length=1)
     checks: list[list[str]] = Field(default_factory=list)
-    dependencies: list[str] = Field(default_factory=list)
+    dependencies: list[str] | None = None
     resources: list[str] = Field(default_factory=list)
     supersedes: str | None = None
 

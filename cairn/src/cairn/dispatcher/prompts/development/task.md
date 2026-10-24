@@ -202,6 +202,9 @@ Role rules:
   resolving the specified design question, without changing the user's project scope.
   For shared architecture changes return the updated architecture and affected intent
   IDs; local corrections can use work with the same stable key as the subject.
+  Include the subject's full current dependencies, with any approved prerequisite
+  changes, in that correction; existing work keys or intent IDs are accepted.
+  Omitted/null dependencies preserve the current list; [] explicitly removes it.
   If the only reported change is automatic dependency remapping, confirm the existing
   contract in a decision without adding work or rerunning unchanged implementation checks.
 

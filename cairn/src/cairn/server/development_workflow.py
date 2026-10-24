@@ -97,6 +97,19 @@ def retry(conn, project_id, intent_id, value, detail, retry_at=None, *, escalate
                        "Decide a new approach using repeated failure evidence")
 
 
+def _validate_dependency_graph(graph, resolved):
+    known = resolved | set(graph)
+    if any(deps - known for deps in graph.values()):
+        raise ValueError("Plan depends on missing or superseded work")
+    pending = set(graph)
+    while pending:
+        ready = {node for node in pending if graph[node] <= resolved}
+        if not ready:
+            raise ValueError("Work dependency cycle")
+        resolved.update(ready)
+        pending -= ready
+
+
 def validate_plan(conn, project_id, outcome):
     if not outcome.within_scope:
         raise ValueError("Outside-scope work must remain a proposal until the operator changes the design")
@@ -104,7 +117,7 @@ def validate_plan(conn, project_id, outcome):
     if len(keys) != len(set(keys)) or not keys:
         raise ValueError("Plan must have nonempty unique work keys")
     existing = {key for intent_id, w in all_work(conn, project_id) for key in (intent_id, w.key) if key}
-    dependencies = {w.key: set(w.dependencies) for w in outcome.work}
+    dependencies = {w.key: set(w.dependencies or []) for w in outcome.work}
     config = store.project(conn, project_id)
     for proposed in outcome.work:
         commands = config.checks + proposed.checks
@@ -140,18 +153,9 @@ def validate_plan(conn, project_id, outcome):
     aliases.update(replacements)
     graph = {i: {aliases.get(d, d) for d in w.dependencies} for i, w in prior.items()
              if w.state not in ("verified", "superseded") and i not in replacements}
-    graph.update({node: {aliases.get(d, d) for d in proposed.dependencies} for node, proposed in additions.items()})
+    graph.update({node: {aliases.get(d, d) for d in (proposed.dependencies or [])} for node, proposed in additions.items()})
     resolved = {i for i, w in prior.items() if w.state == "verified" and i not in replacements}
-    known = resolved | set(graph)
-    if any(deps - known for deps in graph.values()):
-        raise ValueError("Plan depends on missing or superseded work")
-    pending = set(graph)
-    while pending:
-        ready = {node for node in pending if graph[node] <= resolved}
-        if not ready:
-            raise ValueError("Work dependency cycle")
-        resolved.update(ready)
-        pending -= ready
+    _validate_dependency_graph(graph, resolved)
 
 
 def install_plan(conn, project_id, outcome, revision):
@@ -183,7 +187,7 @@ def install_plan(conn, project_id, outcome, revision):
                 store.save_work(conn, project_id, old_id, old)
     for intent_id, proposed in created:
         value = store.work(conn, project_id, intent_id)
-        value.dependencies = [mapping[d] for d in proposed.dependencies]
+        value.dependencies = [mapping[d] for d in (proposed.dependencies or [])]
         store.save_work(conn, project_id, intent_id, value)
     return len(created)
 
@@ -370,8 +374,18 @@ def apply_success(conn, project_id, run, value):
             if len(outcome.work) != 1 or outcome.work[0].key != subject.key:
                 raise ValueError("A design correction may update only the specified work package")
             correction = outcome.work[0]
+            existing = all_work(conn, project_id)
+            mapping = {i: i for i, _ in existing}
+            mapping.update({w.key: i for i, w in existing if w.key and w.state != "superseded"})
+            requested = subject.dependencies if correction.dependencies is None else correction.dependencies
+            dependencies = [mapping.get(d, d) for d in requested]
+            graph = {i: set(w.dependencies) for i, w in existing if w.state not in ("verified", "superseded")}
+            graph[value.subject] = set(dependencies)
+            resolved = {i for i, w in existing if w.state == "verified" and i != value.subject}
+            _validate_dependency_graph(graph, resolved)
             subject.scope, subject.acceptance, subject.checks = correction.scope, correction.acceptance, correction.checks
             subject.resources = correction.resources
+            subject.dependencies = dependencies
         subject.result["design_decision"] = outcome.summary
         subject.result.pop("pending_design", None)
         subject.result.pop("review", None)

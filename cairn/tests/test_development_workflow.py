@@ -224,6 +224,71 @@ def test_architecture_gap_is_sent_to_strong_role_while_other_work_remains_ready(
     assert "compatibility" in works(http, project)[implementation]["result"]["design_decision"]
 
 
+@pytest.mark.parametrize("reference", ["id", "key"])
+def test_arbitration_updates_dependencies_and_blocks_early_claim(http, tmp_path, reference):
+    project, planner = create(http, tmp_path)
+    approve_plan(http, project, planner)
+    implementation = next(i for i, w in works(http, project).items() if w["key"] == "api")
+    with db.get_conn() as conn:
+        prerequisite = store.add_intent(conn, project, "Cold startup", WorkPackage(key="cold-start", role="implementer", revision=1))
+        original = store.work(conn, project, implementation)
+        original.branch = "cairn/preserved-api"
+        store.save_work(conn, project, implementation, original)
+    finish(http, project, implementation, {"kind": "needs_design", "summary": "Needs cold startup first"}, "implementer")
+    arbitration = next(i for i, w in works(http, project).items() if w["purpose"] == "arbitration")
+    correction = {**plan()["work"][0], "dependencies": [prerequisite if reference == "id" else "cold-start"]}
+    finish(http, project, arbitration, {"kind": "decision", "summary": "Wait for the existing cold startup package", "work": [correction]}, "architect")
+    value = works(http, project)[implementation]
+    assert value["dependencies"] == [prerequisite]
+    assert value["branch"] == "cairn/preserved-api"
+    assert claim(http, project, implementation, role="implementer").status_code == 409
+    with db.get_conn() as conn:
+        ready = store.work(conn, project, prerequisite)
+        ready.state = "verified"
+        store.save_work(conn, project, prerequisite, ready)
+    assert claim(http, project, implementation, role="implementer").status_code == 200
+
+
+@pytest.mark.parametrize("dependency", ["missing", "api", "ui", "superseded"])
+def test_arbitration_rejects_invalid_dependency_graph_atomically(http, tmp_path, dependency):
+    project, planner = create(http, tmp_path)
+    approve_plan(http, project, planner)
+    implementation = next(i for i, w in works(http, project).items() if w["key"] == "api")
+    with db.get_conn() as conn:
+        obsolete = store.add_intent(conn, project, "Obsolete", WorkPackage(key="old", state="superseded", revision=1))
+    finish(http, project, implementation, {"kind": "needs_design", "summary": "Needs a prerequisite"}, "implementer")
+    arbitration = next(i for i, w in works(http, project).items() if w["purpose"] == "arbitration")
+    correction = {**plan()["work"][0], "scope": "Must not be installed", "dependencies": [obsolete if dependency == "superseded" else dependency]}
+    finish(http, project, arbitration, {"kind": "decision", "summary": "Invalid prerequisite", "architecture": "Must roll back", "work": [correction]}, "architect")
+    values = works(http, project)
+    assert values[implementation]["state"] == "reviewing"
+    assert values[implementation]["dependencies"] == []
+    assert values[implementation]["scope"] == "API only"
+    assert values[arbitration]["state"] == "waiting"
+    assert "validation_feedback" in values[arbitration]["result"]
+    assert http.get(f"/projects/{project}").json()["project"]["development"]["architecture"] == ""
+
+
+@pytest.mark.parametrize("mode", ["omitted", "null", "empty"])
+def test_arbitration_preserves_dependencies_unless_explicitly_replaced(http, tmp_path, mode):
+    project, planner = create(http, tmp_path)
+    approve_plan(http, project, planner)
+    values = works(http, project)
+    api = next(i for i, w in values.items() if w["key"] == "api")
+    ui = next(i for i, w in values.items() if w["key"] == "ui")
+    with db.get_conn() as conn:
+        prerequisite = store.work(conn, project, api)
+        prerequisite.state = "verified"
+        store.save_work(conn, project, api, prerequisite)
+    finish(http, project, ui, {"kind": "needs_design", "summary": "Clarify UI scope"}, "implementer")
+    arbitration = next(i for i, w in works(http, project).items() if w["purpose"] == "arbitration")
+    correction = {k: v for k, v in plan()["work"][1].items() if k != "dependencies"}
+    if mode != "omitted":
+        correction["dependencies"] = None if mode == "null" else []
+    finish(http, project, arbitration, {"kind": "decision", "summary": "Clarify UI scope", "work": [correction]}, "architect")
+    assert works(http, project)[ui]["dependencies"] == ([] if mode == "empty" else [api])
+
+
 def test_control_received_after_finish_still_fences_unapplied_result(http, tmp_path):
     project, planner = create(http, tmp_path)
     run = claim(http, project, planner).json()
