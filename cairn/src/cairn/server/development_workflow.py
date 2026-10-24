@@ -25,6 +25,10 @@ def fact(conn, project_id, intent_id, summary):
 
 
 def add_review(conn, project_id, subject, purpose, revision, summary):
+    if purpose == "arbitration":
+        existing = pending_arbitration(conn, project_id, subject, revision)
+        if existing:
+            return existing
     source = conn.execute("SELECT id FROM runs WHERE project_id=? AND intent_id=? AND state!='running' ORDER BY rowid DESC LIMIT 1",
                           (project_id, subject)).fetchone()
     resources = []
@@ -35,6 +39,21 @@ def add_review(conn, project_id, subject, purpose, revision, summary):
     return store.add_intent(conn, project_id, summary, WorkPackage(
         role="reviewer" if purpose == "implementation" else "architect",
         purpose=purpose, subject=subject, subject_run=source["id"] if source else None, revision=revision, resources=resources))
+
+
+def pending_arbitration(conn, project_id, subject, revision):
+    pending = [(i, w) for i, w in all_work(conn, project_id)
+               if w.purpose == "arbitration" and w.subject == subject and w.revision == revision
+               and w.state in ("ready", "running", "waiting")]
+    pending.sort(key=lambda item: item[1].state != "running")
+    for intent_id, value in pending[1:]:
+        # Keep live executions; retire only queued duplicates without discarding their evidence.
+        if value.state != "running":
+            value.state = "superseded"
+            store.save_work(conn, project_id, intent_id, value)
+            store.event(conn, project_id, "duplicate_arbitration_retired", intent_id,
+                        "Continue existing arbitration " + pending[0][0])
+    return pending[0][0] if pending else None
 
 
 def ready_planner(conn, project_id, reason):
@@ -56,9 +75,7 @@ def request_design(conn, project_id, intent_id, value, detail):
     running = conn.execute("SELECT 1 FROM runs WHERE project_id=? AND intent_id=? AND state='running'", (project_id, intent_id)).fetchone()
     if not running:
         value.state = "reviewing"
-        if not any(w.subject == intent_id and w.purpose == "arbitration" and w.state in ("ready", "running")
-                   for _, w in all_work(conn, project_id)):
-            add_review(conn, project_id, intent_id, "arbitration", value.revision, value.checkpoint)
+        add_review(conn, project_id, intent_id, "arbitration", value.revision, value.checkpoint)
     store.save_work(conn, project_id, intent_id, value)
 
 
@@ -89,12 +106,10 @@ def retry(conn, project_id, intent_id, value, detail, retry_at=None, *, escalate
         seconds=min(300, 5 * 2 ** min(value.failures, 6)))).isoformat(timespec="seconds").replace("+00:00", "Z")
     store.save_work(conn, project_id, intent_id, value)
     if escalate and value.role == "implementer" and value.failures >= 3:
-        if not any(w.purpose == "arbitration" and w.subject == intent_id and w.state in ("ready", "running")
-                   for _, w in all_work(conn, project_id)):
-            value.state, value.retry_at = "reviewing", None
-            store.save_work(conn, project_id, intent_id, value)
-            add_review(conn, project_id, intent_id, "arbitration", value.revision,
-                       "Decide a new approach using repeated failure evidence")
+        value.state, value.retry_at = "reviewing", None
+        store.save_work(conn, project_id, intent_id, value)
+        add_review(conn, project_id, intent_id, "arbitration", value.revision,
+                   "Decide a new approach using repeated failure evidence")
 
 
 def _validate_dependency_graph(graph, resolved):
@@ -535,6 +550,9 @@ def advance(conn, project_id):
         store.save_work(conn, project_id, run["intent_id"], value)
         conn.execute("UPDATE runs SET applied=1 WHERE id=?", (run["id"],))
     checkpoint(conn, project_id)
+    for subject, revision in {(w.subject, w.revision) for _, w in all_work(conn, project_id)
+                              if w.purpose == "arbitration" and w.state in ("ready", "running", "waiting")}:
+        pending_arbitration(conn, project_id, subject, revision)
     config = store.project(conn, project_id)
     for intent_id, value in all_work(conn, project_id):
         observed = value.result.get("wait_on")

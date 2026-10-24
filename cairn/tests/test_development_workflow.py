@@ -62,6 +62,48 @@ def test_stable_work_key_prevents_duplicate_completed_work(http, tmp_path):
     assert len([w for w in works(http, project).values() if w["role"] == "implementer"]) == 2
 
 
+def test_direction_change_reuses_interrupted_arbitration(http, tmp_path):
+    from cairn.server.development_workflow import all_work, request_design
+    project, planner = create(http, tmp_path)
+    approve_plan(http, project, planner)
+    subject = next(i for i, w in works(http, project).items() if w["key"] == "api")
+    with db.get_conn() as conn:
+        request_design(conn, project, subject, store.work(conn, project, subject), "Cold startup prerequisite")
+        arbitration, value = next((i, w) for i, w in all_work(conn, project) if w.purpose == "arbitration")
+        value.state, value.checkpoint = "waiting", "Project stopped"
+        store.save_work(conn, project, arbitration, value)
+        request_design(conn, project, subject, store.work(conn, project, subject), "Same prerequisite confirmed by another decision")
+    values = works(http, project)
+    assert [i for i, w in values.items() if w["purpose"] == "arbitration"] == [arbitration]
+    assert values[subject]["result"]["pending_design"] == "Same prerequisite confirmed by another decision"
+
+
+@pytest.mark.parametrize("running", [False, True])
+def test_advance_retires_legacy_duplicate_arbitrations_without_losing_evidence(http, tmp_path, running):
+    project, planner = create(http, tmp_path)
+    approve_plan(http, project, planner)
+    subject = next(i for i, w in works(http, project).items() if w["key"] == "api")
+    with db.get_conn() as conn:
+        first = store.add_intent(conn, project, "Interrupted arbitration", WorkPackage(
+            role="architect", purpose="arbitration", subject=subject, revision=1, state="waiting",
+            checkpoint="Saved diagnosis", result={"evidence": "preserved-log"}))
+        second = store.add_intent(conn, project, "Duplicate arbitration", WorkPackage(
+            role="architect", purpose="arbitration", subject=subject, revision=1))
+        newer_revision = store.add_intent(conn, project, "Different control revision", WorkPackage(
+            role="architect", purpose="arbitration", subject=subject, revision=2))
+    if running:
+        assert claim(http, project, second, role="architect").status_code == 200
+    advance(http, project)
+    values = works(http, project)
+    kept, retired = (second, first) if running else (first, second)
+    assert values[kept]["state"] == ("running" if running else "waiting")
+    assert values[retired]["state"] == "superseded"
+    assert values[first]["checkpoint"] == "Saved diagnosis"
+    assert values[first]["result"]["evidence"] == "preserved-log"
+    assert values[newer_revision]["state"] == "ready"
+    assert claim(http, project, retired, role="architect").status_code == 409
+
+
 def test_cyclic_plan_is_rejected_without_partial_tasks(http, tmp_path):
     project, planner = create(http, tmp_path)
     candidate = plan()
