@@ -144,8 +144,10 @@ Role rules:
   editing, run the affected checks; do not loop through full regression suites while
   a known targeted failure remains. Repeat an unchanged check only to test a named
   flakiness hypothesis with a stated stopping condition and recorded outcome.
-  Before returning implemented, run the required package acceptance for the executable
-  changes and fixtures. If only documentation changes after a passing run, verify its
+  Before returning implemented, cite passing required package acceptance for the current
+  executable code and inputs. A prior pass from this same task may be reused after verifying
+  those identities; retain its original provenance instead of rerunning merely for a new attempt.
+  If only documentation changes after a passing run, verify its
   references and source identities instead of repeating the suite just to refresh report
   prose or audit metadata; cite the actual tested source/input identity honestly. The dispatcher
   will independently check the committed candidate; do not rerun an already passing
