@@ -140,6 +140,11 @@ Role rules:
   Cite accepted suggestions incorporated by the plan in addressed_controls. Revisions
   of verified work must name the original intent ID in supersedes; reuse its stable
   work key only for an explicitly justified change, never for blind repetition.
+  For unfinished work, keep its existing intent, stable key and owned WIP: do not
+  use supersedes. Propose its revised contract under that same key without supersedes
+  and include the existing intent ID in affected. Plan approval keeps that task and
+  requests subject arbitration; the arbitration applies the correction in place.
+  Do not invent a new implementation package merely to change an existing dependency.
   Persist the architecture/technical blueprint in architecture and the current stage
   in milestone. Identify affected active intent IDs when changing an existing design.
 - implementer: implement only this feature in this owned worktree; resolve a pending
