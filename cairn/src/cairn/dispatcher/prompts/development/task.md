@@ -140,6 +140,14 @@ Role rules:
   additional independent goals outside this package, save progress and report
   needs_design with the completed/reusable files, precise blocker and proposed split;
   do not silently absorb unrelated work or dispatch workers yourself.
+  Before returning, inventory the entire candidate against work_package.base_commit,
+  including earlier candidate commits, staged/unstaged changes and untracked files;
+  an empty working-tree diff does not prove a scoped delivery. The dispatcher stages
+  all nonignored changes. Keep only approved deliverables and necessary fixtures in
+  that delivery; generated caches and unrelated timestamped test outputs belong in
+  run artifacts. Preserve existing/user evidence rather than deleting or rewriting
+  it to obtain a clean result. If an earlier candidate contains unrelated files,
+  report the exact paths and resolve their delivery scope before claiming completion.
   Diagnose with the smallest check that distinguishes the suspected cause. After
   editing, run the affected checks; do not loop through full regression suites while
   a known targeted failure remains. Repeat an unchanged check only to test a named
@@ -158,6 +166,13 @@ Role rules:
   release conditions. Approve good suggestions and reject harmful ones regardless of
   the author's identity/confidence. User directives are already binding and receive
   no value veto. Mark within_scope false for unauthorized product scope expansion.
+  For implementation review, inventory the full subject base_commit..head_commit
+  before long checks, including changes inherited from previous candidate commits.
+  Check every changed path against ownership; distinguish necessary fixtures from
+  generated caches and unrelated historical outputs. Reviewing only the last commit
+  or the author's current working-tree diff misses already committed scope drift.
+  Unrelated files need a request_changes with exact paths and preservation/release
+  conditions; do not approve them merely because the scoped tests are green.
   Inspect changed code and the relevant raw evidence first. Once a decisive blocker
   justifies request_changes/needs_design, return it with concrete release conditions;
   do not continue an unrelated full acceptance run. Approval still requires full
