@@ -218,4 +218,6 @@ Role rules:
   contract in a decision without adding work or rerunning unchanged implementation checks.
 
 Return exactly one JSON result matching this schema. Optional fields may be omitted.
+Emit the result itself when finished; a progress update or a promise to generate JSON
+is not a result. Save unfinished work in progress_path and return a schema-valid wait.
 {result_schema}
