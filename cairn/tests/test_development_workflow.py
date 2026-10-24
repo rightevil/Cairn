@@ -498,3 +498,75 @@ def test_useful_suggestion_is_accepted_then_applied_by_a_reviewed_plan(http, tmp
     reviewer = next(i for i, w in works(http, project).items() if w["role"] == "architect" and w["purpose"] == "plan")
     finish(http, project, reviewer, {"kind": "review", "verdict": "approve", "summary": "Suggestion is covered by the API acceptance"}, "architect")
     assert http.get(f"/projects/{project}").json()["hints"][0]["control"]["state"] == "applied"
+
+
+@pytest.mark.parametrize("change", ["revoke", "replace"])
+@pytest.mark.parametrize("stage", ["proposal", "approval"])
+def test_inactive_suggestion_cannot_install_a_plan(http, tmp_path, change, stage):
+    project, planner = create(http, tmp_path)
+    hint = http.post(f"/projects/{project}/development/controls", headers=OPERATOR,
+                     json={"content": "Old direction"}).json()
+    assessment = next(i for i, w in works(http, project).items() if w["purpose"] == "suggestion")
+    finish(http, project, assessment, {"kind": "review", "verdict": "approve", "summary": "Initially useful"}, "architect")
+    candidate = {**plan(), "architecture": "Must not be adopted after withdrawal", "addressed_controls": [hint["id"]]}
+    if stage == "approval":
+        finish(http, project, planner, candidate, "planner")
+    if change == "revoke":
+        http.post(f"/projects/{project}/development/controls/{hint['id']}/revoke", headers=OPERATOR).raise_for_status()
+    else:
+        http.post(f"/projects/{project}/development/controls", headers=OPERATOR,
+                  json={"content": "Replacement direction", "replaces": hint["id"]}).raise_for_status()
+    rejected = planner
+    if stage == "proposal":
+        finish(http, project, planner, candidate, "planner")
+    else:
+        rejected = next(i for i, w in works(http, project).items() if w["purpose"] == "plan" and w["role"] == "architect")
+        finish(http, project, rejected, {"kind": "review", "verdict": "approve", "summary": "Approve the old plan"}, "architect")
+    values = works(http, project)
+    assert values[rejected]["state"] == "waiting"
+    assert "inactive control" in values[rejected]["checkpoint"].lower()
+    assert hint["id"] in values[rejected]["checkpoint"]
+    assert not any(w["role"] == "implementer" for w in values.values())
+    data = http.get(f"/projects/{project}").json()
+    assert data["project"]["development"]["architecture"] == ""
+    assert next(h for h in data["hints"] if h["id"] == hint["id"])["control"]["state"] == ("revoked" if change == "revoke" else "replaced")
+
+
+@pytest.mark.parametrize("reference", ["missing", "unassessed"])
+def test_plan_cannot_adopt_unknown_or_unassessed_advice(http, tmp_path, reference):
+    project, planner = create(http, tmp_path)
+    hint_id = "h999"
+    if reference == "unassessed":
+        hint_id = http.post(f"/projects/{project}/development/controls", headers=OPERATOR,
+                            json={"content": "An unreviewed idea"}).json()["id"]
+    finish(http, project, planner, {**plan(), "addressed_controls": [hint_id]}, "planner")
+    values = works(http, project)
+    assert values[planner]["state"] == "waiting"
+    assert hint_id in values[planner]["checkpoint"]
+    assert not any(w["role"] == "implementer" for w in values.values())
+
+
+def test_arbitration_cannot_restore_withdrawn_advice(http, tmp_path):
+    from cairn.server.development_workflow import request_design
+    project, planner = create(http, tmp_path)
+    approve_plan(http, project, planner)
+    hint = http.post(f"/projects/{project}/development/controls", headers=OPERATOR,
+                     json={"content": "Reconsider a prerequisite"}).json()
+    assessment = next(i for i, w in works(http, project).items() if w["purpose"] == "suggestion")
+    finish(http, project, assessment, {"kind": "review", "verdict": "approve", "summary": "Initially justified"}, "architect")
+    values = works(http, project)
+    subject = next(i for i, w in values.items() if w["key"] == "ui")
+    previous = values[subject]
+    with db.get_conn() as conn:
+        request_design(conn, project, subject, store.work(conn, project, subject), "Review the prerequisite")
+    http.post(f"/projects/{project}/development/controls/{hint['id']}/revoke", headers=OPERATOR).raise_for_status()
+    arbitration = next(i for i, w in works(http, project).items() if w["purpose"] == "arbitration")
+    correction = {"key": "ui", "description": "Adjust UI", "scope": "Changed contract", "acceptance": ["Changed acceptance"], "dependencies": []}
+    finish(http, project, arbitration, {"kind": "decision", "summary": "Apply the withdrawn advice", "architecture": "Must not change",
+                                       "addressed_controls": [hint["id"]], "work": [correction]}, "architect")
+    values = works(http, project)
+    assert values[arbitration]["state"] == "waiting"
+    assert "inactive control" in values[arbitration]["checkpoint"].lower()
+    assert values[subject]["dependencies"] == previous["dependencies"]
+    assert values[subject]["scope"] == previous["scope"]
+    assert http.get(f"/projects/{project}").json()["project"]["development"]["architecture"] == ""

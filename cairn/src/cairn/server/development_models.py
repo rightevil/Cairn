@@ -7,6 +7,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 Role = Literal["planner", "implementer", "reviewer", "architect"]
+EFFECTIVE_CONTROL_STATES = ("accepted", "applied", "experiment", "completed")
 
 
 class DevelopmentModel(BaseModel):

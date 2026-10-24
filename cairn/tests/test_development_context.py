@@ -7,13 +7,17 @@ from cairn.dispatcher.config import LocalConfig, WorkerConfig
 from cairn.dispatcher.development import DevelopmentDispatcher
 from cairn.server import db, development_store as store
 from cairn.server.development_models import WorkPackage
-from test_development_api import create, http, claim, WORKER
+from test_development_api import create, http, claim, WORKER, OPERATOR
 from test_development_runtime import Client
 
 
 @pytest.mark.parametrize("review", [False, True])
 def test_context_keeps_full_current_evidence_without_inlining_unrelated_history(http, tmp_path, review):
     project_id, planner = create(http, tmp_path)
+    old_hint = http.post(f"/projects/{project_id}/development/controls", headers=OPERATOR,
+                         json={"content": "Withdrawn advice"}).json()
+    new_hint = http.post(f"/projects/{project_id}/development/controls", headers=OPERATOR,
+                         json={"content": "Pending correction", "replaces": old_hint["id"]}).json()
     large_result = {"output": {"summary": "Historical evidence " * 10000}, "source_run_id": "old-run"}
     with db.get_conn() as conn:
         old = WorkPackage(key="old", state="verified", revision=1, scope="Original ownership",
@@ -38,6 +42,11 @@ def test_context_keeps_full_current_evidence_without_inlining_unrelated_history(
     assert index[old_id] == old.model_dump(mode="json")
     assert context["work_package"]["id"] == current_id
     assert context["work_package"]["scope"] == intent.work.scope
+    assert context["current_controls"] == []
+    assert context["control_status"][old_hint["id"]]["state"] == "replaced"
+    assert context["control_status"][new_hint["id"]]["state"] == "received"
+    assert context["control_status"][new_hint["id"]]["replaces"] == old_hint["id"]
+    assert "content" not in context["control_status"][old_hint["id"]]
     if review:
         assert context["subject"]["work"] == index[old_id]
     else:

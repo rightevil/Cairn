@@ -7,7 +7,7 @@ import json
 from fastapi import HTTPException
 
 from cairn.server import development_store as store
-from cairn.server.development_models import Control, DevelopmentOutcome, WorkPackage
+from cairn.server.development_models import Control, DevelopmentOutcome, EFFECTIVE_CONTROL_STATES, WorkPackage
 from cairn.server.services import next_fact_id, next_hint_id, utcnow
 
 
@@ -125,9 +125,21 @@ def _validate_dependency_graph(graph, resolved):
         pending -= ready
 
 
+def validate_addressed_controls(conn, project_id, outcome):
+    for hint_id in outcome.addressed_controls:
+        row = conn.execute("SELECT control FROM hints WHERE project_id=? AND id=?", (project_id, hint_id)).fetchone()
+        if not row or not row["control"]:
+            raise ValueError(f"Unknown control in result: {hint_id}; use IDs from current_controls")
+        control = Control.model_validate_json(row["control"])
+        if control.state not in EFFECTIVE_CONTROL_STATES:
+            raise ValueError(f"Result references inactive control {hint_id} (state={control.state}); "
+                             "use current effective controls, not withdrawn or unassessed advice")
+
+
 def validate_plan(conn, project_id, outcome):
     if not outcome.within_scope:
         raise ValueError("Outside-scope work must remain a proposal until the operator changes the design")
+    validate_addressed_controls(conn, project_id, outcome)
     keys = [w.key for w in outcome.work]
     if len(keys) != len(set(keys)) or not keys:
         raise ValueError("Plan must have nonempty unique work keys")
@@ -352,6 +364,8 @@ def work_versions(conn, project_id, intent_ids):
 def apply_success(conn, project_id, run, value):
     result = run_result(run)
     outcome = DevelopmentOutcome.model_validate(result.get("output", result))
+    if outcome.kind == "decision":
+        validate_addressed_controls(conn, project_id, outcome)
     value.result = result
     value.result["source_run_id"] = run["id"]
     value.checkpoint = outcome.summary

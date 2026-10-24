@@ -17,7 +17,7 @@ from cairn.dispatcher.runtime.cancellation import TaskCancellation
 from cairn.dispatcher.runtime.git_workspace import GitWorkspace, IntegrationWait, file_artifact, git, write_artifact
 from cairn.dispatcher.runtime.process_identity import process_identity, stop_owned_process
 from cairn.dispatcher.workers.registry import get_driver
-from cairn.server.development_models import DevelopmentOutcome, DevelopmentProject
+from cairn.server.development_models import DevelopmentOutcome, DevelopmentProject, EFFECTIVE_CONTROL_STATES
 
 LOG = logging.getLogger(__name__)
 
@@ -189,7 +189,7 @@ class DevelopmentDispatcher:
             if not path.is_relative_to(self.directory) or not path.is_file() or file_artifact(path).sha256 != item["sha256"]:
                 raise RuntimeError("Source evidence is missing, outside the data directory, or has changed")
         hints = [{"id": h.id, "content": h.content, "control": h.control.model_dump(mode="json")}
-                 for h in project.hints if h.control and h.control.state in ("accepted", "applied", "experiment", "completed")]
+                 for h in project.hints if h.control and h.control.state in EFFECTIVE_CONTROL_STATES]
         candidate = next((h.content for h in project.hints if h.id == intent.work.subject), None)
         feedback = intent.work.result.get("validation_feedback")
         if feedback is None and intent.work.checkpoint.startswith("Invalid result:"):
@@ -218,6 +218,8 @@ class DevelopmentDispatcher:
             "attempt_history_path": str(directory / "attempt-history.json"),
             "progress_path": str(directory / "progress.json"),
             "current_controls": hints,
+            "control_status": {h.id: {field: getattr(h.control, field) for field in
+                ("kind", "state", "revision", "scope", "replaces")} for h in project.hints if h.control},
             "raw_evidence": evidence,
             "work_index_path": str(directory / "work-index.json"),
             "recent_work": {k: {field: v[field] for field in (
