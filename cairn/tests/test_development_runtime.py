@@ -163,6 +163,47 @@ class Client:
         return ApiResult(response.status_code, response.json(), response.text)
 
 
+def test_direction_barrier_is_dispatched_before_older_planning_and_then_releases_writer(http, tmp_path):
+    from concurrent.futures import Future
+    from cairn.dispatcher.config import LocalConfig, WorkerConfig
+    from cairn.server import db, development_store as store
+    from test_development_api import create
+    from test_development_workflow import advance
+
+    project, planner = create(http, tmp_path)
+    with db.get_conn() as conn:
+        writer = store.add_intent(conn, project, "Ready implementation", WorkPackage(key="feature", revision=1))
+        direction = store.add_intent(conn, project, "Review direction", WorkPackage(
+            role="architect", purpose="direction", revision=1))
+    loop = DispatcherLoop.__new__(DispatcherLoop)
+    loop.client = Client(http)
+    loop.config = SimpleNamespace(local=LocalConfig(workspace_root=str(tmp_path / "data")),
+        runtime=SimpleNamespace(execution="local", max_workers=3, max_project_workers=3, max_running_projects=1),
+        workers=[WorkerConfig(name="strong", type="claudecode", roles=["planner", "architect"], tier="strong", max_running=1, priority=0),
+                 WorkerConfig(name="standard", type="claudecode", roles=["implementer"], max_running=2, priority=0)])
+    loop.futures, loop.runtime_project_ids, loop._log_state = {}, set(), {}
+    loop.project_cursor, loop.development = 0, None
+    submissions = []
+
+    def submit(*args):
+        future = Future()
+        submissions.append((args, future))
+        return future
+
+    loop.executor = SimpleNamespace(submit=submit)
+    loop._dispatch_available(loop.client.list_projects())
+    assert [args[2].id for args, _ in submissions] == [direction]
+    run = submissions[0][0][4]
+    http.post(f"/projects/{project}/development/runs/{run['id']}/finish", headers=WORKER, json={
+        "token": run["token"], "outcome": "success", "result": {"output": {
+            "kind": "review", "verdict": "approve", "summary": "Direction remains aligned"}}}).raise_for_status()
+    advance(http, project)
+    submissions[0][1].set_result("success")
+    loop._reap_futures()
+    loop._dispatch_available(loop.client.list_projects())
+    assert {args[2].id for args, _ in submissions[1:]} == {planner, writer}
+
+
 def test_development_failure_log_shows_reason_and_artifact_path_without_credentials(http, tmp_path, monkeypatch, caplog):
     from cairn.dispatcher import development
     from cairn.dispatcher.config import LocalConfig, WorkerConfig

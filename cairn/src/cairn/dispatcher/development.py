@@ -115,7 +115,10 @@ class DevelopmentDispatcher:
             if project.project.status != "active":
                 return False
             counts = self.loop._worker_counts()
-            candidates = sorted(project.intents, key=lambda i: (i.work.role == "implementer" if i.work else True, i.created_at))
+            # Direction reviews block writers, so dispatch them before ordinary planning.
+            candidates = sorted(project.intents, key=lambda i: (
+                not (i.work and i.work.purpose == "direction"),
+                i.work.role == "implementer" if i.work else True, i.created_at))
             for intent in candidates:
                 value = intent.work
                 if value is None:
