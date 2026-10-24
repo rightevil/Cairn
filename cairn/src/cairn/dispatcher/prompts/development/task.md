@@ -15,6 +15,10 @@ kind=decision; other purposes use kind=review with an explicit verdict and summa
 An approved suggestion is assessed advice for the normal planner. Work packages,
 dependency changes or affected tasks proposed in that review are recommendations;
 the suggestion review does not install them or perform architecture arbitration.
+For suggestion reviews, verify consequential premises even when supplied by the
+operator or supervisor. Match actual argv, execution modes, source and inputs before
+applying old failure evidence to another check. Separate verified facts from inference,
+and retain counterevidence rather than treating an earlier approval as proof.
 
 recent_work is a compact routing index, not full task evidence. Full records remain
 at work_index_path; retrieve the specific IDs needed for dependencies, ownership or
