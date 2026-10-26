@@ -24,6 +24,12 @@ local:
   workspace_root: .cairn/workspaces  # relative to this YAML, retained on stop/completion
   completed_action: keep
 
+# Local BMAD main repository and Matt Pocock's skills repository.
+# Copies are isolated per design session and pinned to their current Git commits.
+design:
+  bmad_repository: ../BMAD-METHOD
+  grilling_repository: ../skills
+
 # Only single-call/process timeouts; no project budget or cumulative attempt limit.
 tasks:
   development_timeout: 3600
@@ -38,7 +44,7 @@ workers:
   - name: strong-design
     type: claudecode
     tier: strong
-    roles: [planner, architect]
+    roles: [planner, architect, implementer]
     max_running: 1
     priority: 0
     env_from:

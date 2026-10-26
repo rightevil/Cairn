@@ -123,6 +123,10 @@ class DevelopmentDispatcher:
                 value = intent.work
                 if value is None:
                     continue
+                if project.project.development.phase == "design" and not (value.purpose == "design" or
+                    value.purpose == "plan" and value.subject and next((i.work.result.get("design_candidate")
+                    for i in project.intents if i.id == value.subject and i.work), None)):
+                    continue
                 diagnostic = value.checkpoint
                 for configured in self.config.workers:
                     for key, secret in configured.env.items():
@@ -144,7 +148,9 @@ class DevelopmentDispatcher:
                 if any(next((i.work.state for i in project.intents if i.id == dep and i.work), None) != "verified"
                        for dep in value.dependencies):
                     continue
-                workers = sorted([w for w in self.config.workers if value.role in w.roles and counts.get(w.name, 0) < w.max_running],
+                workers = sorted([w for w in self.config.workers if value.role in w.roles and counts.get(w.name, 0) < w.max_running
+                                  and (value.role != "implementer" or w.tier == value.model_tier)
+                                  and (value.purpose != "design" or w.type == "claudecode" and w.tier == "strong")],
                                  key=lambda w: (w.priority, counts.get(w.name, 0)))
                 if not integration and not workers:
                     self.loop._log_changed(f"development:{summary.id}:{value.role}:unavailable", logging.WARNING,
@@ -292,6 +298,14 @@ class DevelopmentDispatcher:
                 output = {"kind": "implemented", "summary": "PR integration and checks"}
                 outcome = "success" if snapshot.get("checks_passed") or snapshot.get("needs_rebase") else "failed"
                 detail = snapshot.get("detail", "Integration checks " + ("passed" if outcome == "success" else "failed"))
+            elif intent.work.purpose == "design":
+                import asyncio
+                from cairn.dispatcher.design_session import run_turn
+                worktree = repository.snapshot(run["id"])
+                output, session = asyncio.run(run_turn(self, project, intent, worker, run, directory, worktree, cancellation))
+                snapshot = {"worker_type": worker.type, "tier": worker.tier}
+                evidence.extend([file_artifact(directory / "stdout.log"), file_artifact(directory / "stderr.log")])
+                outcome, detail = "success", output["summary"]
             else:
                 state = self.call(project.project.id, "")
                 if intent.work.role == "implementer":
@@ -357,6 +371,21 @@ class DevelopmentDispatcher:
                     response = driver.extract_response_text(result.stdout, result.stderr)
                     parsed = DevelopmentOutcome.model_validate(parse_json_output(response))
                     output, outcome, detail = parsed.model_dump(mode="json"), "success", parsed.summary
+                    subject = next((i for i in project.intents if i.id == intent.work.subject), None)
+                    if subject and subject.work.result.get("design_candidate") and parsed.kind == "review" and parsed.verdict == "approve":
+                        draft = subject.work.result["design_snapshot"]
+                        if frozen_commit != draft["baseline"]:
+                            raise RuntimeError("Design baseline changed before independent review")
+                        commands = list(config.checks)
+                        for task in draft["work"]:
+                            for argv in task["checks"]:
+                                if argv not in commands:
+                                    commands.append(argv)
+                        passed, checks = repository.checks(worktree, commands, directory, cancellation)
+                        evidence.extend(checks)
+                        snapshot.update(design_baseline=frozen_commit, checks_passed=passed)
+                        if not passed:
+                            raise RuntimeError("Design readiness checks failed; reopen and resolve the recorded failures")
                     if intent.work.role == "implementer" and parsed.kind == "implemented":
                         head = repository.commit_implementation(worktree, intent.id)
                         base = intent.work.base_commit

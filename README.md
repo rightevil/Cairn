@@ -32,6 +32,9 @@ Cairn is a general-purpose problem-solving engine. <br/>It defines no roles, no 
 
 ## This fork: unattended software development
 
+新增方案设计阶段（本地文档）：网页直接对话，由 Claude Code 自动编排
+BMAD 主仓库与 Grilling；设计草案经独立评审和用户确认后，直接成为 Cairn 原生任务。
+
 本 fork 增加了面向软件开发的无人值守闭环：Magpie 按角色提供强／普通模型，
 复用 Claude Code、Codex 和已有 Pi；功能分支独立开发，经过独立审查、串行 PR
 合并与集成验证。原有网页图谱新增开发面板、建议／指令、运行日志和证据入口。

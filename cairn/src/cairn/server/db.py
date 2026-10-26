@@ -93,6 +93,8 @@ def configure(path: Path) -> None:
         _ensure_project_columns(conn)
         from cairn.server.development_store import migrate
         migrate(conn)
+        from cairn.server.design import SCHEMA as DESIGN_SCHEMA
+        conn.executescript(DESIGN_SCHEMA)
 
 
 def _ensure_project_columns(conn: sqlite3.Connection) -> None:

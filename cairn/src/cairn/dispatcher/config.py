@@ -167,6 +167,11 @@ class LocalConfig(BaseModel):
     completed_action: LocalCompletedAction = "keep"
 
 
+class DesignConfig(BaseModel):
+    bmad_repository: str
+    grilling_repository: str
+
+
 class RuntimeConfig(BaseModel):
     max_workers: int = Field(gt=0)
     max_running_projects: int = Field(gt=0)
@@ -206,8 +211,6 @@ class WorkerConfig(BaseModel):
             raise ValueError("task_types or roles must not be empty")
         if set(self.roles) & {"planner", "architect"} and self.tier != "strong":
             raise ValueError("planner and architect roles require the strong model tier")
-        if "implementer" in self.roles and self.tier != "standard":
-            raise ValueError("implementation roles require the standard model tier")
         if self.command is not None and (not self.command or not all(self.command)):
             raise ValueError("command must be a nonempty argv prefix")
         for target, source in self.env_from.items():
@@ -239,6 +242,7 @@ class DispatchConfig(BaseModel):
     tasks: TasksConfig
     container: ContainerConfig | None = None
     local: LocalConfig | None = None
+    design: DesignConfig | None = None
     common_env: dict[str, str] = Field(default_factory=dict)
     workers: list[WorkerConfig]
     worker_token_file: str | None = None

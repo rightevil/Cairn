@@ -13,6 +13,7 @@ dependencies = [
     "pyyaml>=6.0",
     "docker>=7.1.0",
     "requests>=2.32.3",
+    "claude-agent-sdk==0.2.174",
 ]
 
 [project.scripts]

@@ -200,7 +200,8 @@ def install_plan(conn, project_id, outcome, revision):
             previous.state = "superseded"
             store.save_work(conn, project_id, proposed.supersedes, previous)
         value = WorkPackage(key=proposed.key, scope=proposed.scope, acceptance=proposed.acceptance,
-                            checks=proposed.checks, resources=proposed.resources, revision=revision)
+                            checks=proposed.checks, resources=proposed.resources, revision=revision,
+                            spec_refs=proposed.spec_refs, model_tier=proposed.model_tier)
         intent_id = store.add_intent(conn, project_id, proposed.description, value)
         mapping[proposed.key] = intent_id
         created.append((intent_id, proposed))
@@ -264,6 +265,10 @@ def apply_review(conn, project_id, run, value, outcome):
         value.state = "superseded"
         return
     independent_session(conn, project_id, run, value.subject)
+    if subject.result.get("design_candidate"):
+        from cairn.server.design import apply_review as apply_design_review
+        apply_design_review(conn, project_id, run, value, subject, outcome)
+        return
     if subject.state in ("superseded", "verified"):
         value.state = "superseded"
         return
@@ -369,6 +374,12 @@ def apply_success(conn, project_id, run, value):
     value.result = result
     value.result["source_run_id"] = run["id"]
     value.checkpoint = outcome.summary
+    if value.purpose == "design":
+        if outcome.kind != "design":
+            raise ValueError("Design conversation must return a design turn result")
+        value.state = "verified"
+        store.event(conn, project_id, "design_turn_finished", run["intent_id"], outcome.summary)
+        return
     if outcome.kind in ("wait", "proposal"):
         config = store.project(conn, project_id)
         value.waits += 1
@@ -558,11 +569,16 @@ def advance(conn, project_id):
                 store.event(conn, project_id, "result_rejected", run["id"], error)
             finally:
                 conn.execute("RELEASE apply_result")
+        elif run["state"] != "superseded" and value.purpose == "design":
+            value.state, value.retry_at = "waiting", None
+            value.checkpoint = run["detail"] or run["state"]
         elif run["state"] != "superseded":
             retry(conn, project_id, run["intent_id"], value, run["detail"] or run["state"], run["retry_at"],
                   escalate=run["state"] == "failed")
         store.save_work(conn, project_id, run["intent_id"], value)
         conn.execute("UPDATE runs SET applied=1 WHERE id=?", (run["id"],))
+    if store.project(conn, project_id).phase == "design":
+        return  # Design drafts never trigger automatic implementation planning.
     checkpoint(conn, project_id)
     for subject, revision in {(w.subject, w.revision) for _, w in all_work(conn, project_id)
                               if w.purpose == "arbitration" and w.state in ("ready", "running", "waiting")}:

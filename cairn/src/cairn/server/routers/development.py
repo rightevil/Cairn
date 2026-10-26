@@ -96,8 +96,9 @@ def initialize(conn, project_id: str, config: DevelopmentProject) -> None:
                                        "wait_reason": "", "wake_at": None})
     store.save_project(conn, project_id, config)
     conn.execute("UPDATE projects SET bootstrap_enabled = 0 WHERE id = ?", (project_id,))
-    store.add_intent(conn, project_id, "Plan the current milestone within the project design",
-                     WorkPackage(role="planner", purpose="plan", revision=1))
+    if config.phase == "execution":
+        store.add_intent(conn, project_id, "Plan the current milestone within the project design",
+                         WorkPackage(role="planner", purpose="plan", revision=1))
 
 
 @router.put("", dependencies=[Depends(require_operator)])
@@ -117,6 +118,15 @@ def public_run(row):
     for key in ("result", "evidence", "streams"):
         data[key] = json.loads(data[key])
     return data
+
+
+@router.get("/runs/{run_id}", dependencies=[Depends(require_reader)])
+def get_run(project_id: str, run_id: str):
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM runs WHERE project_id=? AND id=?", (project_id, run_id)).fetchone()
+        if row is None:
+            raise HTTPException(404, "Run not found")
+        return public_run(row)
 
 
 @router.get("/intents/{intent_id}/runs", dependencies=[Depends(require_reader)])
@@ -222,6 +232,10 @@ def claim(project_id: str, intent_id: str, body: RunClaim):
         conn.execute("BEGIN IMMEDIATE")
         config = store.project(conn, project_id, active=True)
         value = store.work(conn, project_id, intent_id)
+        if config.phase == "design" and not (value.purpose == "design" or (
+            value.purpose == "plan" and value.subject and
+            store.work(conn, project_id, value.subject).result.get("design_candidate"))):
+            raise HTTPException(409, "Design phase permits conversation and frozen-candidate review only")
         if value.role != body.role or value.revision != body.revision:
             raise HTTPException(409, "Role or control revision changed")
         if store.stale_review(conn, project_id, value):
@@ -362,7 +376,7 @@ def add_control(conn, project_id: str, body: ControlRequest):
     hint_id = next_hint_id(conn, project_id)
     conn.execute("INSERT INTO hints(id,project_id,content,creator,created_at,control) VALUES(?,?,?,?,?,?)",
                  (hint_id, project_id, body.content, "operator", utcnow(), store.dump(control)))
-    if kind == "suggestion":
+    if kind == "suggestion" and config.phase != "design":
         store.add_intent(conn, project_id, "Independently evaluate suggestion " + hint_id,
                          WorkPackage(role="architect", purpose="suggestion", subject=hint_id, revision=config.revision))
     store.event(conn, project_id, "control_received", hint_id, kind)

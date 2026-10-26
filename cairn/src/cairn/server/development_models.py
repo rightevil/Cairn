@@ -32,6 +32,7 @@ class DevelopmentModel(BaseModel):
 
 
 class DevelopmentProject(DevelopmentModel):
+    phase: Literal["design", "execution"] = "execution"
     repository: str = Field(min_length=1)
     integration_branch: str = ""
     remote: str = "origin"
@@ -53,6 +54,8 @@ class DevelopmentProject(DevelopmentModel):
 
 
 class WorkPackage(DevelopmentModel):
+    spec_refs: list[str] = Field(default_factory=list)
+    model_tier: Literal["strong", "standard"] = "standard"
     key: str = ""
     role: Role = "implementer"
     state: Literal["proposed", "ready", "running", "waiting", "implemented", "reviewing",
@@ -66,7 +69,7 @@ class WorkPackage(DevelopmentModel):
     resources: list[str] = Field(default_factory=list)
     subject: str | None = None
     subject_run: str | None = None
-    purpose: Literal["plan", "implementation", "suggestion", "arbitration", "milestone", "direction"] = "implementation"
+    purpose: Literal["design", "plan", "implementation", "suggestion", "arbitration", "milestone", "direction"] = "implementation"
     branch: str | None = None
     base_commit: str | None = None
     head_commit: str | None = None
@@ -82,6 +85,8 @@ class WorkPackage(DevelopmentModel):
 
 
 class PlannedWork(DevelopmentModel):
+    spec_refs: list[str] = Field(default_factory=list)
+    model_tier: Literal["strong", "standard"] = "standard"
     key: str = Field(min_length=1)
     description: str = Field(min_length=1)
     scope: str = Field(min_length=1)
@@ -93,7 +98,7 @@ class PlannedWork(DevelopmentModel):
 
 
 class DevelopmentOutcome(DevelopmentModel):
-    kind: Literal["plan", "implemented", "review", "decision", "wait", "needs_design", "complete", "proposal"]
+    kind: Literal["design", "plan", "implemented", "review", "decision", "wait", "needs_design", "complete", "proposal"]
     summary: str = Field(min_length=1)
     work: list[PlannedWork] = Field(default_factory=list)
     verdict: Literal["approve", "request_changes", "needs_design", "reject", "defer", "experiment"] | None = None

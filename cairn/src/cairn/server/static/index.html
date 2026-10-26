@@ -14,6 +14,7 @@
 <script src="/static/vendor/elk.bundled.js"></script>
 <script src="/static/vendor/cytoscape-elk.js"></script>
 <script src="/static/development.js"></script>
+<script src="/static/design.js"></script>
 <script defer src="/static/vendor/alpine.min.js"></script>
 <style>
   [x-cloak] { display: none !important; }
@@ -485,7 +486,7 @@
 
   <div class="flex-1 flex overflow-hidden" id="graphLayout">
     <!-- Graph -->
-    <div class="flex-1 relative min-w-0">
+    <div x-show="sideTab !== 'design'" class="flex-1 relative min-w-0">
       <div class="absolute top-3 left-3 z-10 flex items-center gap-1.5">
         <button @click="fitGraph()" class="h-7 w-7 bg-white/90 backdrop-blur rounded-lg shadow-sm border border-slate-200/60 text-slate-500 hover:text-slate-700 hover:bg-white transition inline-flex items-center justify-center" title="适应图谱" aria-label="适应图谱">
           <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.7" viewBox="0 0 24 24"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M16 3h3a2 2 0 0 1 2 2v3"/><path d="M8 21H5a2 2 0 0 1-2-2v-3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/></svg>
@@ -570,6 +571,39 @@
       <div id="cy" class="relative z-0 flex-1 h-full"></div>
     </div>
 
+    <section x-show="sideTab === 'design'" class="flex-1 min-w-0 flex flex-col bg-slate-50" aria-label="方案设计对话">
+      <header class="border-b bg-white px-6 py-4 flex justify-between gap-3">
+        <div><h2 class="font-semibold">方案设计</h2><p class="text-xs text-slate-500 mt-1">Claude Code · BMAD 设计流程 · Grilling 决策访谈</p></div>
+        <button @click="sideTab = 'development'; $nextTick(() => fitGraph())" class="text-sm text-brand-600">返回开发黑板</button>
+      </header>
+      <div x-ref="designHistory" class="flex-1 overflow-y-auto px-6 py-4 space-y-4" aria-live="polite">
+        <p x-show="!designEntries.length" class="text-sm text-slate-500">直接描述你想做的项目或调整。设计 Agent 会自动使用对应 Skill，与您逐步确定方案。</p>
+        <template x-for="entry in designEntries" :key="entry.id">
+          <article class="rounded-xl border p-4" :class="entry.role === '你' ? 'bg-sky-50 border-sky-100' : 'bg-white border-slate-200'">
+            <p class="text-xs text-slate-400 mb-2" x-text="entry.role"></p><p class="whitespace-pre-wrap break-words text-sm leading-relaxed" x-text="entry.text"></p>
+          </article>
+        </template>
+        <template x-for="question in designDraft.questions.filter(q => q.answer === null)" :key="question.id">
+          <article class="rounded-xl border border-amber-200 bg-amber-50 p-4 space-y-3">
+            <p class="text-sm font-medium whitespace-pre-wrap" x-text="question.text"></p>
+            <p class="text-xs text-slate-600" x-show="question.recommendation" x-text="'推荐：' + question.recommendation"></p>
+            <div class="flex flex-wrap gap-2"><template x-for="option in question.options" :key="option"><button @click="designAnswers[question.id] = option" class="border rounded-lg px-3 py-1.5 bg-white text-xs" x-text="option"></button></template></div>
+            <label class="block text-xs">您的决定<textarea x-model="designAnswers[question.id]" rows="2" class="mt-1 border rounded-lg p-2 w-full bg-white text-sm" placeholder="可选择上面的建议，也可自由回答"></textarea></label>
+            <button @click="sendDesign(question)" :disabled="designSending || designBusy() || !designAnswers[question.id]?.trim() || !!designDraft.candidate.digest" class="rounded-lg bg-brand-500 text-white text-xs px-3 py-2 disabled:opacity-40">提交此回答并继续</button>
+          </article>
+        </template>
+        <p x-show="designBusy()" class="text-sm text-teal-700">设计 Agent 正在处理，进度与 Skill 调用会实时显示。</p>
+      </div>
+      <footer class="border-t bg-white px-6 py-4 space-y-2">
+        <p x-show="designError || developmentError" class="text-xs text-rose-600" x-text="designError || developmentError" role="alert"></p>
+        <div x-show="designCommands().length" class="border rounded-lg p-1 max-h-48 overflow-auto" role="listbox" aria-label="可用斜杠命令">
+          <template x-for="(command, index) in designCommands()" :key="command.name"><button @click="designInput = '/' + command.name + ' '" class="block w-full text-left p-2 text-xs rounded" :class="index === designCommandIndex ? 'bg-sky-50' : ''" x-text="'/' + command.name + ' ' + (command.description || '')" role="option" :aria-selected="index === designCommandIndex"></button></template>
+        </div>
+        <textarea x-model="designInput" @input="designCommandIndex = 0; designCommandOpen = true; designMessageId = ''" @keydown="designKey($event)" aria-label="设计消息" rows="3" placeholder="直接输入需求；输入 / 查找本会话真实可用的命令。Enter 发送，Shift+Enter 换行。" class="border rounded-xl p-3 w-full text-sm" :disabled="project.project.development?.phase !== 'design' || !!designDraft.candidate.digest"></textarea>
+        <div class="flex justify-between gap-3"><p class="text-xs text-slate-400">问题与草案会保存；离开页面不会视为确认。</p><div class="flex gap-3"><button x-show="designBusy()" @click="interruptDesign()" class="text-xs text-rose-600">中断当前回复</button><button @click="sendDesign()" :disabled="designSending || designBusy() || !operatorToken || !designInput.trim() || !!designDraft.candidate.digest || project.project.development?.phase !== 'design'" class="rounded-lg px-4 py-2 bg-brand-500 text-white text-xs disabled:opacity-40">发送</button></div></div>
+      </footer>
+    </section>
+
     <div @pointerdown.prevent="startPanelResize($event)" class="w-2 shrink-0 cursor-col-resize group flex items-stretch justify-center touch-none relative z-20">
       <div class="w-px bg-slate-200/70 transition group-hover:bg-brand-300" :class="{ 'bg-brand-400': isResizingPanel }"></div>
     </div>
@@ -577,6 +611,7 @@
     <!-- Side panel -->
     <div class="border-l border-slate-200/60 bg-white flex flex-col overflow-hidden shrink-0 relative z-20" :style="{ width: sidePanelWidth + 'px', minWidth: sidePanelWidth + 'px', flexBasis: sidePanelWidth + 'px' }">
       <div class="flex border-b border-slate-100 shrink-0">
+        <button x-show="project.project.development" @click="sideTab = 'design'; loadDesign(selectedProjectId)" class="flex-1 px-2 py-2.5 text-xs font-medium whitespace-nowrap" :class="sideTab === 'design' ? 'text-brand-600 border-b-2 border-brand-500' : 'text-slate-400'">方案设计</button>
         <button x-show="project.project.development" @click="sideTab = 'development'" class="flex-1 px-3 py-2.5 text-xs font-medium" :class="sideTab === 'development' ? 'text-brand-600 border-b-2 border-brand-500' : 'text-slate-400'">开发</button>
         <button @click="sideTab = 'detail'" class="flex-1 px-3 py-2.5 text-xs font-medium transition"
           :class="sideTab === 'detail' ? 'text-brand-600 border-b-2 border-brand-500' : 'text-slate-400 hover:text-slate-600'">详情</button>
@@ -589,6 +624,32 @@
       </div>
 
       <!-- Detail -->
+      <div x-show="sideTab === 'design'" class="flex-1 overflow-y-auto p-4 space-y-4 bg-slate-50">
+        <section class="bg-white rounded-xl border p-4 space-y-2">
+          <h3 class="font-semibold text-sm" x-text="'设计草案 v' + designDraft.version"></h3>
+          <p class="text-xs text-slate-500" x-text="'当前阶段：' + ({ brief: '目标与范围', requirements: '需求', ux: '体验', architecture: '架构', plan: '原生开发计划' }[designDraft.stage] || designDraft.stage)"></p>
+          <p class="text-xs break-all" x-show="designDraft.baseline" x-text="'代码基线：' + designDraft.baseline"></p>
+          <p class="text-xs" x-text="'原生任务：' + designDraft.work.length + ' · 未回答：' + designDraft.questions.filter(q => q.answer === null).length"></p>
+          <template x-for="decision in designDraft.decisions" :key="decision"><p class="text-xs whitespace-pre-wrap" x-text="'• ' + decision"></p></template>
+        </section>
+        <section class="bg-white rounded-xl border p-4 space-y-2">
+          <h3 class="font-semibold text-sm">设计产物</h3>
+          <template x-for="(content, id) in designDraft.documents" :key="id"><details class="border-b py-2"><summary class="cursor-pointer text-sm" x-text="id"></summary><p class="text-xs whitespace-pre-wrap mt-2 leading-relaxed" x-text="content"></p></details></template>
+          <template x-for="task in designDraft.work" :key="task.key"><details class="border-b py-2"><summary class="text-xs cursor-pointer" x-text="task.key + ' · ' + task.description"></summary><pre class="text-xs whitespace-pre-wrap break-all mt-2" x-text="JSON.stringify(task, null, 2)"></pre></details></template>
+        </section>
+        <section class="bg-white rounded-xl border p-4 space-y-3">
+          <h3 class="font-semibold text-sm">确认与交付</h3>
+          <p class="text-xs text-slate-500">冻结版本后先独立评审。通过后，点击确认即将此版本的任务直接交给 Cairn 派发。</p>
+          <p x-show="designDraft.candidate.digest" class="font-mono text-xs break-all" x-text="designDraft.candidate.digest"></p>
+          <p x-show="designDraft.candidate.review" class="text-xs" x-text="'独立评审：' + ({ pending: '等待评审', approve: '通过', request_changes: '需要修改', reject: '未通过', needs_design: '需要继续设计' }[designDraft.candidate.review] || designDraft.candidate.review)"></p>
+          <p class="text-xs whitespace-pre-wrap" x-text="designDraft.candidate.summary || ''"></p>
+          <button x-show="!designDraft.candidate.digest && project.project.development?.phase === 'design'" @click="designAction('candidate')" :disabled="designBusy() || designSending || !designDraft.work.length" class="border rounded-lg px-3 py-2 text-xs disabled:opacity-40">冻结当前版本并独立评审</button>
+          <button x-show="designDraft.candidate.digest && project.project.development?.phase === 'design'" @click="designAction('reopen')" :disabled="designSending || !!runningDevelopmentRuns().length" class="border rounded-lg px-3 py-2 text-xs disabled:opacity-40">返回设计修改</button>
+          <button x-show="designDraft.candidate.review === 'approve' && project.project.development?.phase === 'design'" @click="designAction('publish')" :disabled="designSending" class="rounded-lg bg-brand-500 text-white px-3 py-2 text-xs disabled:opacity-40" x-text="'确认 v' + designDraft.version + ' 并开始开发'"></button>
+          <p x-show="project.project.development?.phase === 'execution' && designDraft.releases?.length" class="text-xs text-teal-700">此方案已交付。请到开发黑板查看进度、提出建议或指令。</p>
+          <p x-show="project.project.development?.phase === 'execution' && !designDraft.releases?.length" class="text-xs text-slate-500">当前项目采用直接开发模式，通过开发黑板调整设计。新项目可选择先讨论方案。</p>
+        </section>
+      </div>
       <div x-show="sideTab === 'development'" class="flex-1 overflow-y-auto p-4 space-y-4 bg-slate-50">
         <template x-if="project.project.development">
           <div class="space-y-4">
@@ -612,6 +673,7 @@
               <template x-for="run in runningDevelopmentRuns()" :key="run.id">
                 <article class="rounded-lg border border-teal-200 bg-teal-50 p-2 text-xs space-y-1">
                   <p class="font-medium text-teal-800" x-text="developmentRunStatus(run)"></p>
+                  <button @click="openAgentWindow(run)" class="text-brand-600 underline">打开 Agent 窗口</button>
                   <p class="break-all" x-text="run.worker + ' · ' + run.intent_id + (run.pid ? ' · PID ' + run.pid : '')"></p>
                   <p class="text-slate-600" x-text="'开始：' + developmentTime(run.started_at)"></p>
                   <p class="text-slate-600" x-text="'最近心跳：' + developmentTime(run.heartbeat_at)"></p>
@@ -672,6 +734,7 @@
                 <details class="rounded-xl border bg-white p-3 text-xs">
                   <summary class="cursor-pointer"><span x-text="developmentRole(run.role)"></span> · <span x-text="developmentRunStatus(run)"></span><span class="block text-slate-400 break-all" x-text="run.worker + ' · ' + run.intent_id + (run.pid ? ' · PID ' + run.pid : '')"></span><span class="block text-slate-400" x-text="developmentTime(run.started_at)"></span></summary>
                   <p class="mt-2 whitespace-pre-wrap break-words" x-text="run.detail || run.checkpoint"></p>
+                  <button @click="openAgentWindow(run)" class="mt-2 text-brand-600 underline">打开 Agent 窗口</button>
                   <p class="text-slate-500" x-text="run.result?.snapshot?.requested_model ? '请求模型：' + run.result.snapshot.requested_model : ''"></p>
                   <div x-show="run.state === 'running'" class="mt-2 flex gap-3"><button x-show="run.streams?.stdout" @click="viewDevelopmentStream(run, 'stdout')" class="text-brand-600 underline">实时输出</button><button x-show="run.streams?.stderr" @click="viewDevelopmentStream(run, 'stderr')" class="text-brand-600 underline">实时错误</button></div>
                   <div class="mt-2 flex flex-wrap gap-2"><template x-for="(item, index) in run.evidence" :key="index"><button @click="viewDevelopmentEvidence(run, index)" class="text-brand-600 underline" x-text="item.path.split(/[\\/]/).pop() + (item.exit_code !== null ? ' [' + item.exit_code + ']' : '')"></button></template></div>
@@ -902,6 +965,7 @@
     <div class="mb-4 space-y-3">
       <label class="flex items-center gap-2 text-sm"><input type="checkbox" x-model="newDevelopment.enabled"> 软件开发项目</label>
       <div x-show="newDevelopment.enabled" class="space-y-3">
+        <label class="block text-xs text-slate-500">开始方式<select x-model="newDevelopment.phase" class="mt-1 w-full border rounded-lg p-2 text-sm"><option value="design">先与 AI 讨论方案（推荐）</option><option value="execution">已有明确方案，直接开发</option></select></label>
         <label class="block text-xs text-slate-500">仓库绝对路径<input x-model="newDevelopment.repository" placeholder="项目仓库根目录的绝对路径" class="mt-1 w-full border rounded-lg p-2 text-sm"></label>
         <label class="block text-xs text-slate-500">集成分支（留空使用当前分支）<input x-model="newDevelopment.integration_branch" class="mt-1 w-full border rounded-lg p-2 text-sm"></label>
         <label class="block text-xs text-slate-500">交付方式<select x-model="newDevelopment.delivery" class="mt-1 w-full border rounded-lg p-2 text-sm"><option value="github">GitHub PR（需要远端仓库）</option><option value="local">本地审查合并（不上传代码）</option></select></label>
@@ -1198,6 +1262,7 @@
 function cairnApp() {
   return {
     ...developmentFeatures(),
+    ...designFeatures(),
     view: 'list',
     projects: [],
     project: null,
@@ -2238,6 +2303,7 @@ function cairnApp() {
       this.selectedTimelineEntryId = null;
       await this.loadProject(id);
       this.view = 'graph';
+      this.sideTab = this.project?.project?.development?.phase === 'design' ? 'design' : (this.project?.project?.development ? 'development' : 'detail');
       if (location.hash !== `#/projects/${id}`) location.hash = `/projects/${id}`;
       this.$nextTick(() => {
         const clampedWidth = this.clampPanelWidth(this.sidePanelWidth);
@@ -2252,6 +2318,7 @@ function cairnApp() {
     },
 
     backToList(fromRoute) {
+      this.designStream?.abort();
       if (this.replay.active) {
         this.stopReplayTimer();
         this.replay.active = false;
@@ -3431,7 +3498,7 @@ function cairnApp() {
         const data = await this.api('POST', '/projects', body);
         this.showNewProject = false;
         this.newProject = { title:'', origin:'', goal:'', bootstrap: true, hints: [{ content:'' }] };
-        this.newDevelopment = { enabled: true, repository: '', integration_branch: '', delivery: 'github', design: '', checks: '' };
+        this.newDevelopment = { enabled: true, phase: 'design', repository: '', integration_branch: '', delivery: 'github', design: '', checks: '' };
         await this.loadProjects();
         await this.openProject(data.project.id);
         this.showToast('项目已创建');

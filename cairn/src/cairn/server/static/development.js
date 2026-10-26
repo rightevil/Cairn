@@ -5,7 +5,7 @@ function developmentFeatures() {
     developmentError: '',
     developmentProjectId: '',
     developmentNow: Date.now(),
-    newDevelopment: { enabled: true, repository: '', integration_branch: '', delivery: 'github', design: '', checks: '' },
+    newDevelopment: { enabled: true, phase: 'design', repository: '', integration_branch: '', delivery: 'github', design: '', checks: '' },
     developmentControl: { kind: 'suggestion', content: '', scope: '', replaces: '' },
     developmentArtifact: { open: false, name: '', text: '' },
 
@@ -25,7 +25,7 @@ function developmentFeatures() {
       }
       this.saveOperatorToken();
       return { repository: this.newDevelopment.repository.trim(), integration_branch: this.newDevelopment.integration_branch.trim(),
-        delivery: this.newDevelopment.delivery, design: this.newDevelopment.design.trim() || this.newProject.goal, checks };
+        phase: this.newDevelopment.phase || 'design', delivery: this.newDevelopment.delivery, design: this.newDevelopment.design.trim() || this.newProject.goal, checks };
     },
 
     async setDevelopmentDelivery(mode) {
@@ -50,6 +50,7 @@ function developmentFeatures() {
       try {
         const result = await this.api('GET', `/projects/${id}/development`);
         if (this.selectedProjectId === id) this.developmentState = result;
+        if (this.selectedProjectId === id && this.loadDesign) await this.loadDesign(id);
         this.developmentError = '';
       } catch (error) { this.developmentError = error.message; }
     },
@@ -75,6 +76,7 @@ function developmentFeatures() {
       if (!Number.isFinite(heartbeat) || this.developmentNow - heartbeat > 60000) return '心跳待确认，等待执行器核对';
       if (!run.pid && run.role !== 'integration') return '准备工作区／启动进程';
       const intent = this.project?.intents?.find(item => item.id === run.intent_id);
+      if (intent?.work?.purpose === 'design') return '方案设计访谈中';
       if (run.role === 'planner') return intent?.work?.result?.review_feedback ? '修订方案中' : '规划中';
       return { architect: '审查／设计中', reviewer: '独立审查中', implementer: '实现中', integration: '合并与集成验证中' }[run.role] || '执行中';
     },
@@ -82,6 +84,7 @@ function developmentFeatures() {
     developmentText(text) {
       const fixed = {
         'Plan the current milestone within the project design': '按项目设计规划当前里程碑',
+        'Design conversation': '方案设计对话',
         'Replan affected work using current user directives': '根据当前用户指令重新规划受影响的工作',
         'Evaluate the pending suggestion against the updated project direction': '按更新后的项目方向独立评估待处理建议',
         'Plan the next milestone within the approved project design': '在已确认的项目设计内规划下一里程碑',
