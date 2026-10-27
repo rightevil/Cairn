@@ -11,6 +11,10 @@ function designFeatures() {
         && this.designReadiness.version === this.designDraft.version;
     },
 
+    visibleDesignEntries() {
+      return this.designEntries.filter(entry => String(entry.text || '').replace(/[\s\u200B-\u200D\uFEFF]/g, '').length);
+    },
+
     designBusy() {
       return (this.project?.intents || []).some(i => i.work?.purpose === 'design' && ['ready', 'running', 'implemented'].includes(i.work.state));
     },

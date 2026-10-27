@@ -24,6 +24,13 @@ replay.designReceive({ id: 3, kind: 'text', data: { block: 'run:2:1', text: 'Sam
 assert.equal(replay.designEntries.length, 2, 'Identical text in a different streamed message is legitimate');
 replay.designReceive({ id: 4, kind: 'text', data: { block: 'run:2:1', text: 'Complete text', mode: 'snapshot' } });
 assert.equal(replay.designEntries[1].text, 'Complete text');
+const emptyMessages = context.cairnApp();
+emptyMessages.designReceive({ id: 1, kind: 'text', data: { block: 'empty', text: '' } });
+emptyMessages.designReceive({ id: 2, kind: 'text', data: { block: 'spaces', text: ' \n\u200B' } });
+emptyMessages.designReceive({ id: 3, kind: 'activity', data: { tool: 'Skill', skill: 'bmad-review' } });
+assert.equal(emptyMessages.visibleDesignEntries().length, 1, 'Empty stream blocks must not render Agent headings');
+emptyMessages.designReceive({ id: 4, kind: 'text', data: { block: 'empty', text: 'A real response' } });
+assert.equal(emptyMessages.visibleDesignEntries().length, 2, 'A populated placeholder must become visible');
 assert.equal(app.canSubmitDesign(), false);
 app.designReadiness = { ready: true, issues: [], version: app.designDraft.version };
 assert.equal(app.canSubmitDesign(), true);
