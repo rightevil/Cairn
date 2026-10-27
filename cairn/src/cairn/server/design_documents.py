@@ -16,7 +16,7 @@ def source_paths(content):
 
 def artifact_roots(conn, project_id):
     repository = Path(store.project(conn, project_id).repository)
-    roots = [repository / ".cairn" / "artifacts"]
+    roots = []
     for row in conn.execute("SELECT id,streams FROM runs WHERE project_id=? ORDER BY rowid DESC", (project_id,)):
         value = json.loads(row["streams"]).get("stdout")
         if not value:
@@ -24,7 +24,7 @@ def artifact_roots(conn, project_id):
         path = Path(value)
         if path.name == "stdout.log" and path.parent.name == row["id"] and path.parent.parent.name == "runs" and path.parent.parent.parent.name == project_id:
             roots.append(path.parent.parent.parent / "design-session" / "artifacts")
-    return list(dict.fromkeys(roots))
+    return list(dict.fromkeys([*roots, repository / ".cairn" / "artifacts"]))
 
 
 def resolve_documents(conn, project_id, draft):

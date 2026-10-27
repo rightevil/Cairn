@@ -5,7 +5,7 @@ function designFeatures() {
     designStream: null, designStreamProject: '', designSending: false, designMessageId: '', designCommandIndex: 0, designCommandOpen: true,
     designError: '', designDocument: '', designFollowPending: false, designMessageSignature: '',
     designReadiness: { ready: false, issues: ['正在检查提交条件'], version: -1 },
-    designDocuments: {}, designDocumentErrors: [],
+    designDocuments: {}, designDocumentErrors: [], designArtifactDirectory: '',
 
     openDesignDocument(name) {
       const text = this.designDocuments[name];
@@ -57,6 +57,7 @@ function designFeatures() {
         this.designAnswers = {}; this.designMessageId = ''; this.designDocument = '';
         this.designReadiness = { ready: false, issues: ['正在检查提交条件'], version: -1 };
         this.designDocuments = {}; this.designDocumentErrors = [];
+        this.designArtifactDirectory = '';
       }
       try {
         const state = await this.api('GET', `/projects/${id}/development/design?after=${this.designCursor}`);
@@ -64,6 +65,7 @@ function designFeatures() {
         this.designDraft = state.draft;
         this.designDocuments = state.document_views || {};
         this.designDocumentErrors = state.document_errors || [];
+        this.designArtifactDirectory = state.artifact_directory || '';
         this.designReadiness = state.readiness || { ready: false, issues: ['请重启 Cairn 以加载提交校验'], version: -1 };
         for (const item of state.messages) this.designReceive(item);
         this.designError = '';

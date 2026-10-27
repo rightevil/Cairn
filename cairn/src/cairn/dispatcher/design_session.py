@@ -10,6 +10,7 @@ import uuid
 
 from cairn.dispatcher.design_skills import BMAD_SKILLS, prepare, run_script
 from cairn.dispatcher.runtime.git_workspace import git
+from cairn.dispatcher.runtime.design_artifacts import export_artifacts
 from cairn.dispatcher.runtime.process_identity import process_identity
 from cairn.server.development_models import PlannedWork
 
@@ -39,6 +40,8 @@ async def run_turn(dispatcher, project, intent, worker, run, directory, snapshot
     workspace = dispatcher.directory / pid / "design-session"
     workspace.mkdir(parents=True, exist_ok=True)
     await asyncio.to_thread(prepare, workspace, dispatcher.config.design)
+    repository = Path(project.project.development.repository)
+    await asyncio.to_thread(export_artifacts, workspace / "artifacts", repository)
     state = dispatcher.call(pid, "design?input_id=" + str(intent.work.result["message_id"]))
     draft = state["draft"]
     baseline = git(snapshot, "rev-parse", "HEAD")
@@ -63,6 +66,7 @@ async def run_turn(dispatcher, project, intent, worker, run, directory, snapshot
            "work": {"type": "array", "items": PlannedWork.model_json_schema()}}, "required": ["version", "stage", "documents", "decisions", "work"], "additionalProperties": False})
     async def save_draft(args):
         try:
+            await asyncio.to_thread(export_artifacts, workspace / "artifacts", repository)
             return result(await asyncio.to_thread(emit, "draft", args))
         except RuntimeError as exc:
             return result(str(exc), True)
@@ -221,6 +225,7 @@ async def run_turn(dispatcher, project, intent, worker, run, directory, snapshot
         finally:
             watcher.cancel()
             await asyncio.gather(watcher, return_exceptions=True)
+            await asyncio.to_thread(export_artifacts, workspace / "artifacts", repository)
     if finished is None or finished.is_error:
         raise RuntimeError("Claude design turn failed: " + (getattr(finished, "result", None) or "missing result"))
     return {"kind": "design", "summary": "Design turn saved; awaiting user input or candidate review"}, session

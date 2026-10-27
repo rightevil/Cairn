@@ -121,9 +121,11 @@ def state(project_id: str, after: int = 0, input_id: int | None = None):
         else:
             history = messages(conn, project_id, after)
         from cairn.server.design_documents import resolve_documents
+        from pathlib import Path
         documents, _, document_errors = resolve_documents(conn, project_id, draft)
         return {"draft": draft, "messages": history, "readiness": readiness(conn, project_id, draft),
-                "document_views": documents, "document_errors": document_errors}
+                "document_views": documents, "document_errors": document_errors,
+                "artifact_directory": str(Path(store.project(conn, project_id).repository) / ".cairn" / "artifacts")}
 
 
 def ensure_idle(conn, project_id):

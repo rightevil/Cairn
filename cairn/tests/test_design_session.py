@@ -8,6 +8,26 @@ import pytest
 from cairn.dispatcher import design_session, design_skills
 from cairn.dispatcher.runtime.cancellation import TaskCancellation
 from cairn.server.development_models import PlannedWork
+from test_development_runtime import repository
+
+
+def test_design_artifact_export_updates_owned_files_and_preserves_user_edits(tmp_path, repository):
+    from cairn.dispatcher.runtime.design_artifacts import export_artifacts
+    from cairn.dispatcher.runtime.git_workspace import git
+    source = tmp_path / 'artifacts'
+    source.mkdir()
+    spec = source / 'spec.md'
+    spec.write_text('First specification', encoding='utf-8')
+    root = export_artifacts(source, repository)
+    assert (root / 'spec.md').read_text() == 'First specification'
+    assert not git(repository, 'status', '--porcelain')
+    spec.write_text('Second specification', encoding='utf-8')
+    export_artifacts(source, repository)
+    assert (root / 'spec.md').read_text() == 'Second specification'
+    (root / 'spec.md').write_text('User edits', encoding='utf-8')
+    with pytest.raises(RuntimeError, match='preserving'):
+        export_artifacts(source, repository)
+    assert (root / 'spec.md').read_text() == 'User edits'
 
 
 def test_design_tools_cannot_write_repository_or_read_unrelated_files(tmp_path):
@@ -52,6 +72,7 @@ def test_sdk_turn_automatically_orchestrates_and_resumes_with_persisted_question
     directory.mkdir(parents=True)
     captured, events = {}, []
     monkeypatch.setattr(design_session, 'prepare', lambda *args: None)
+    monkeypatch.setattr(design_session, 'export_artifacts', lambda *args: None)
     monkeypatch.setattr(design_session, 'git', lambda *args: 'a' * 40)
     from cairn.dispatcher import development
     monkeypatch.setattr(development, 'executable_argv', lambda *args: ['claude.exe'])
@@ -97,7 +118,7 @@ def test_sdk_turn_automatically_orchestrates_and_resumes_with_persisted_question
             captured['interrupt'] = True
 
     monkeypatch.setattr(sdk, 'ClaudeSDKClient', Client)
-    project = SimpleNamespace(project=SimpleNamespace(id='project'), hints=[])
+    project = SimpleNamespace(project=SimpleNamespace(id='project', development=SimpleNamespace(repository=str(tmp_path / 'repository'))), hints=[])
     dispatcher = SimpleNamespace(directory=tmp_path, config=SimpleNamespace(design=None), call=call)
     worker = SimpleNamespace(env={'ANTHROPIC_MODEL': 'strong'}, model=None)
     intent = SimpleNamespace(work=SimpleNamespace(result={'message_id': 1}))
