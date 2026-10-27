@@ -316,6 +316,10 @@ class DispatchConfig(BaseModel):
         if config.worker_token_file:
             token_path = Path(config.worker_token_file).expanduser()
             config.worker_token_file = str(token_path if token_path.is_absolute() else path.resolve().parent / token_path)
+        if config.design:
+            for name in ("bmad_repository", "grilling_repository"):
+                source = Path(getattr(config.design, name)).expanduser()
+                setattr(config.design, name, str((source if source.is_absolute() else path.resolve().parent / source).resolve()))
         validate_prompt_resources(config.runtime.prompt_group)
         return config
 

@@ -38,6 +38,153 @@ def claim(http, project, intent, worker="writer", role="planner", revision=1):
                      json={"worker": worker, "role": role, "revision": revision, "host": "local-test"})
 
 
+def test_local_browser_session_is_origin_bound_and_cannot_authorize_workers(http):
+    with TestClient(app, base_url="http://127.0.0.1:8765", client=("127.0.0.1", 5000)) as browser:
+        assert browser.get("/workspace/projects").status_code == 401
+        response = browser.get("/")
+        assert "HttpOnly" in response.headers["set-cookie"]
+        assert "SameSite=strict" in response.headers["set-cookie"]
+        assert "test-operator" not in response.headers["set-cookie"]
+        assert browser.get("/workspace/projects").status_code == 200
+        assert browser.get("/workspace/projects", headers={"Origin": "https://other.example"}).status_code == 401
+        assert browser.get("/workspace/projects", headers={"Sec-Fetch-Site": "cross-site"}).status_code == 401
+        assert browser.get("http://127.0.0.1:8766/workspace/projects").status_code == 401
+        assert browser.get("/workspace/projects", headers={"Host": "rebound.example"}).status_code == 401
+        project, intent = create(http, Path.cwd())
+        assert browser.get(f"/projects/{project}/development").status_code == 200
+        assert claim(browser, project, intent).status_code == 200  # Explicit worker header remains supported.
+        assert browser.post(f"/projects/{project}/development/advance").status_code == 401
+    with TestClient(app, base_url="http://rebound.example", client=("127.0.0.1", 5000)) as untrusted:
+        assert "set-cookie" not in untrusted.get("/").headers
+    with TestClient(app, base_url="http://127.0.0.1", client=("192.0.2.8", 5000)) as remote:
+        assert "set-cookie" not in remote.get("/").headers
+
+
+def test_folder_browser_is_local_read_only_and_repeatable(http, tmp_path):
+    folder = tmp_path / "设计项目"
+    folder.mkdir()
+    (folder / "src").mkdir()
+    (folder / "README.md").write_text("not a folder", encoding="utf-8")
+    assert http.get("/workspace/folders", headers=OPERATOR).status_code == 403
+    with TestClient(app, base_url="http://localhost", client=("127.0.0.1", 5000)) as browser:
+        browser.get("/")
+        for _ in range(3):
+            response = browser.get("/workspace/folders", params={"directory": str(folder)})
+            assert response.status_code == 200
+            data = response.json()
+            assert data["name"] == "设计项目"
+            assert Path(data["directory"]) == folder.resolve()
+            assert [entry["name"] for entry in data["entries"]] == ["src"]
+            assert Path(data["parent"]) == tmp_path.resolve()
+        assert not (folder / ".git").exists()
+        assert browser.post("/workspace/folder").status_code == 410
+        assert browser.get("/workspace/folders", params={"directory": "relative"}).status_code == 422
+        assert browser.get("/workspace/folders", params={"directory": str(folder) + "\0"}).status_code == 422
+        assert browser.get("/workspace/folders", params={"directory": str(folder / "missing")}).status_code == 404
+        assert browser.get("/workspace/folders", params={"directory": str(folder / "README.md")}).status_code == 422
+        assert browser.get("/workspace/folders", params={"directory": ""}).json()["directory"] is None
+
+
+def test_folder_browser_reports_access_errors(http, tmp_path, monkeypatch):
+    from cairn.server.routers import workspace
+    def denied(*args, **kwargs):
+        raise PermissionError("access denied")
+    with TestClient(app, base_url="http://localhost", client=("127.0.0.1", 5000)) as browser:
+        browser.get("/")
+        monkeypatch.setattr(workspace.os, "scandir", denied)
+        response = browser.get("/workspace/folders", params={"directory": str(tmp_path)})
+        assert response.status_code == 403
+        assert "无法访问" in response.json()["detail"]
+
+
+def test_create_folder_is_local_preserves_existing_files_and_rejects_paths(http, tmp_path):
+    body = {"directory": str(tmp_path), "name": "新项目"}
+    assert http.post("/workspace/folders", json=body).status_code == 401
+    assert http.post("/workspace/folders", headers=OPERATOR, json=body).status_code == 403
+    with TestClient(app, base_url="http://localhost", client=("127.0.0.1", 5000)) as browser:
+        browser.get("/")
+        response = browser.post("/workspace/folders", json=body)
+        assert response.status_code == 201, response.text
+        target = tmp_path / "新项目"
+        assert target.is_dir() and list(target.iterdir()) == []
+        assert Path(response.json()["directory"]) == target.resolve()
+        assert response.json()["entries"] == []
+        assert browser.post("/workspace/folders", json=body).status_code == 409
+        existing = tmp_path / "existing.txt"
+        existing.write_text("Keep existing data", encoding="utf-8")
+        assert browser.post("/workspace/folders", json={**body, "name": "existing.txt"}).status_code == 409
+        assert existing.read_text(encoding="utf-8") == "Keep existing data"
+        for name in (".", "..", "../escape", "sub/name", "sub\\name", "CON", "nul.txt", "bad.", "bad?name", "   "):
+            assert browser.post("/workspace/folders", json={**body, "name": name}).status_code == 422
+        assert browser.post("/workspace/folders", json={**body, "directory": "relative"}).status_code == 422
+        assert browser.post("/workspace/folders", json={**body, "directory": str(tmp_path / "missing")}).status_code == 404
+
+
+def test_create_folder_reports_permission_error(http, tmp_path, monkeypatch):
+    def denied(*args, **kwargs):
+        raise PermissionError("access denied")
+    with TestClient(app, base_url="http://localhost", client=("127.0.0.1", 5000)) as browser:
+        browser.get("/")
+        monkeypatch.setattr(Path, "mkdir", denied)
+        response = browser.post("/workspace/folders", json={"directory": str(tmp_path), "name": "new-project"})
+        assert response.status_code == 403
+        assert "没有权限" in response.json()["detail"]
+
+
+def test_workspace_creates_design_first_without_origin_goal_or_planner(http, tmp_path):
+    from cairn.server.routers.workspace import git
+    directory = tmp_path / "new-project"
+    directory.mkdir()
+    response = http.post("/workspace/projects", headers=OPERATOR,
+                         json={"directory": str(directory), "name": "New project"})
+    assert response.status_code == 201, response.text
+    payload = response.json()
+    project = payload["project"]["id"]
+    config = payload["project"]["development"]
+    assert config["phase"] == "design" and config["delivery"] == "local"
+    assert payload["intents"] == [] and not payload["project"]["bootstrap_enabled"]
+    baseline = git(directory, "rev-parse", "HEAD")
+    assert baseline in payload["facts"][0]["description"]
+    assert git(directory, "status", "--porcelain") == ""
+    assert http.post("/workspace/projects", headers=OPERATOR, json={"directory": str(directory)}).status_code == 409
+    # A direct user message starts the existing design workflow, without invoking a skill manually.
+    turn = http.post(f"/projects/{project}/development/design/messages", headers=OPERATOR,
+                     json={"id": "first-message", "content": "Help design the application"})
+    assert turn.status_code == 201, turn.text
+    intents = http.get(f"/projects/{project}").json()["intents"]
+    assert len(intents) == 1 and intents[0]["work"]["purpose"] == "design"
+
+
+def test_workspace_preserves_existing_code_and_counts_only_verified_implementation(http, tmp_path):
+    from cairn.server.routers.workspace import git
+    directory = tmp_path / "existing-project"
+    directory.mkdir()
+    (directory / "source.txt").write_text("Keep this code", encoding="utf-8")
+    assert http.post("/workspace/projects", headers=OPERATOR, json={"directory": str(directory)}).status_code == 422
+    assert not (directory / ".git").exists()
+    git(directory, "init")
+    git(directory, "add", "source.txt")
+    git(directory, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", "test baseline")
+    baseline = git(directory, "rev-parse", "HEAD")
+    (directory / "source.txt").write_text("Uncommitted work", encoding="utf-8")
+    child = directory / "child"
+    child.mkdir()
+    (child / "keep.txt").write_text("Keep", encoding="utf-8")
+    assert http.post("/workspace/projects", headers=OPERATOR, json={"directory": str(child)}).status_code == 422
+    response = http.post("/workspace/projects", headers=OPERATOR, json={"directory": str(directory)})
+    assert response.status_code == 201, response.text
+    project = response.json()["project"]["id"]
+    assert git(directory, "rev-parse", "HEAD") == baseline
+    assert (directory / "source.txt").read_text() == "Uncommitted work"
+    assert http.get(f"/workspace/projects/{project}/files?query=source", headers=OPERATOR).json() == ["source.txt"]
+    with db.get_conn() as conn:
+        for role, state in [("planner", "verified"), ("architect", "verified"), ("implementer", "merged"),
+                            ("implementer", "verified"), ("implementer", "superseded")]:
+            store.add_intent(conn, project, "Task", WorkPackage(role=role, state=state, revision=1))
+    progress = http.get("/workspace/projects", headers=OPERATOR).json()[0]["progress"]
+    assert progress["total"] == 2 and progress["verified"] == 1
+
+
 def test_development_round_trip_and_legacy_write_cannot_bypass_review(http, tmp_path):
     project, intent = create(http, tmp_path)
     data = http.get(f"/projects/{project}").json()

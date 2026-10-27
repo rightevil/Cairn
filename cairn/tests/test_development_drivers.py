@@ -173,20 +173,22 @@ def test_unrecognized_windows_cli_install_fails_at_startup(tmp_path, monkeypatch
         loop._run_local_binary_check()
 
 
-def test_explicit_native_cli_command_keeps_the_original_prompt():
+def test_explicit_native_cli_command_keeps_the_original_prompt(tmp_path):
     from cairn.dispatcher.development import executable_argv
-    role = worker(command=["/custom/claude.exe"])
-    assert executable_argv(role, ["claude", "-p", "--", "prompt"]) == ["/custom/claude.exe", "-p", "--", "prompt"]
+    executable = str(tmp_path / "custom" / "claude.exe")
+    role = worker(command=[executable])
+    assert executable_argv(role, ["claude", "-p", "--", "prompt"]) == [executable, "-p", "--", "prompt"]
 
 
-def test_cli_probe_runs_the_resolved_native_prefix(monkeypatch):
+def test_cli_probe_runs_the_resolved_native_prefix(monkeypatch, tmp_path):
     from cairn.dispatcher.scheduler import loop
     observed = []
     monkeypatch.setattr(loop.shutil, "which", lambda binary: binary)
     monkeypatch.setattr(loop.subprocess, "run", lambda argv, **kw: observed.append(argv) or SimpleNamespace(returncode=0))
-    path, runnable = loop.DispatcherLoop._probe_local_cli(("node.exe", "/CLI with spaces/cli.js"))
+    entry = str(tmp_path / "CLI with spaces" / "cli.js")
+    path, runnable = loop.DispatcherLoop._probe_local_cli(("node.exe", entry))
     assert runnable and path == "node.exe"
-    assert observed == [["node.exe", "/CLI with spaces/cli.js", "--help"]]
+    assert observed == [["node.exe", entry, "--help"]]
 
 
 @pytest.mark.parametrize("model", ["group/cairn-strong", "MiniMax-M3", "workbuddy/deepseek-v4.1-flash"])

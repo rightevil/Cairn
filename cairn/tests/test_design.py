@@ -115,6 +115,29 @@ def test_frontier_questions_require_explicit_operator_answers(http, repository):
     assert state['draft']['version'] == 2
 
 
+def test_card_answers_save_one_question_at_a_time_and_resume_only_after_the_last(http, repository):
+    project = create_design(http, repository)
+    run = claim(http, project, send(http, project)).json()
+    questions = [{'id': 'Q1', 'text': 'First choice?'}, {'id': 'Q2', 'text': 'Second choice?'}]
+    assert agent(http, project, run, 'questions', {'questions': questions}).status_code == 200
+    finish(http, project, run, {'kind': 'design', 'summary': 'Waiting for answers'})
+    first = http.post(url(project, '/messages'), headers=OPERATOR, json={
+        'id': 'card-one', 'content': 'Q1: First answer', 'answers': {'Q1': 'First answer'}})
+    assert first.status_code == 201 and first.json()['intent_id'] is None
+    assert first.json()['remaining_questions'] == ['Q2']
+    draft = http.get(url(project), headers=OPERATOR).json()['draft']
+    assert [q['answer'] for q in draft['questions']] == ['First answer', None]
+    assert len(http.get(f'/projects/{project}').json()['intents']) == 1
+    assert http.post(url(project, '/messages'), headers=OPERATOR, json={
+        'id': 'card-one', 'content': 'Q1: First answer', 'answers': {'Q1': 'First answer'}}).status_code == 201
+    final = http.post(url(project, '/messages'), headers=OPERATOR, json={
+        'id': 'card-two', 'content': 'Q2: Second answer', 'answers': {'Q2': 'Second answer'}})
+    assert final.status_code == 201 and final.json()['intent_id']
+    assert len(http.get(f'/projects/{project}').json()['intents']) == 2
+    draft = http.get(url(project), headers=OPERATOR).json()['draft']
+    assert [q['answer'] for q in draft['questions']] == ['First answer', 'Second answer']
+
+
 def test_native_release_requires_review_and_exact_confirmation_then_is_atomic_idempotent(http, repository):
     project, _, _, _ = ready(http, repository)
     draft = freeze(http, project)

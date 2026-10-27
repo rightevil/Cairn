@@ -30,6 +30,27 @@ def _create_project(client: TestClient) -> str:
     return response.json()["project"]["id"]
 
 
+def test_workspace_asset_urls_change_with_content_to_avoid_stale_scripts(client, tmp_path, monkeypatch):
+    from importlib import import_module
+    import re
+    module = import_module("cairn.server.app")
+    assets = tmp_path / "static"
+    assets.mkdir()
+    names = ("workspace.css", "development.js", "design.js", "workspace.js")
+    for name in (*names, "index.html"):
+        (assets / name).write_bytes((module.STATIC_DIR / name).read_bytes())
+    monkeypatch.setattr(module, "STATIC_DIR", assets)
+    response = client.get("/")
+    assert response.status_code == 200 and response.headers["cache-control"] == "no-store"
+    first = dict(re.findall(r'/static/([^"?]+)\?v=([a-f0-9]+)', response.text))
+    assert set(first) == set(names)
+    script = assets / "workspace.js"
+    script.write_text(script.read_text(encoding="utf-8").replace("folderOpen: false", "folderOpen: true "), encoding="utf-8")
+    second = dict(re.findall(r'/static/([^"?]+)\?v=([a-f0-9]+)', client.get("/").text))
+    assert first["workspace.js"] != second["workspace.js"]
+    assert all(first[name] == second[name] for name in names if name != "workspace.js")
+
+
 def test_project_workflow_create_conclude_complete_and_reopen(client: TestClient) -> None:
     project_id = _create_project(client)
 

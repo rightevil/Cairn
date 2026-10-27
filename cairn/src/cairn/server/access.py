@@ -5,11 +5,34 @@ import hashlib
 import hmac
 import os
 import secrets
+from ipaddress import ip_address
 from pathlib import Path
 
 from fastapi import HTTPException, Request
 
 from cairn.server import db
+
+OPERATOR_COOKIE = "cairn_operator"
+
+
+def local_browser(request: Request) -> bool:
+    """Only literal loopback origins can bootstrap a local browser session."""
+    try:
+        return bool(request.client and ip_address(request.client.host).is_loopback
+                    and request.url.hostname in {"localhost", "127.0.0.1", "::1"})
+    except ValueError:
+        return False
+
+
+def browser_session(request: Request) -> str:
+    # Bind to the exact origin so another local service cannot reuse this cookie.
+    return hmac.new(credential("operator").encode(), str(request.base_url).encode(), "sha256").hexdigest()
+
+
+def same_origin(request: Request) -> bool:
+    origin = request.headers.get("origin")
+    return (request.headers.get("sec-fetch-site") != "cross-site"
+            and (not origin or origin == str(request.base_url).rstrip("/")))
 
 
 def credential_path(role: str) -> Path:
@@ -37,8 +60,12 @@ def credential(role: str) -> str:
 
 def require_operator(request: Request) -> None:
     candidate = request.headers.get("x-cairn-operator-token", "")
-    if not hmac.compare_digest(candidate, credential("operator")):
-        raise HTTPException(401, "Operator token required")
+    if candidate and hmac.compare_digest(candidate, credential("operator")):
+        return
+    if (local_browser(request) and same_origin(request)
+            and hmac.compare_digest(request.cookies.get(OPERATOR_COOKIE, ""), browser_session(request))):
+        return
+    raise HTTPException(401, "Operator token required")
 
 
 def require_worker(request: Request) -> None:
@@ -48,8 +75,11 @@ def require_worker(request: Request) -> None:
 
 
 def require_reader(request: Request) -> None:
-    if hmac.compare_digest(request.headers.get("x-cairn-operator-token", ""), credential("operator")):
+    try:
+        require_operator(request)
         return
+    except HTTPException:
+        pass
     require_worker(request)
 
 

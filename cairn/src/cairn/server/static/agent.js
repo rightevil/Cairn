@@ -28,9 +28,9 @@ function readable(text) {
   return output;
 }
 async function get(url) {
-  const response = await fetch(url, { headers: { 'X-Cairn-Operator-Token': sessionStorage.getItem('cairn.operatorToken') || '' } });
+  const response = await fetch(url);
   if (!response.ok) {
-    if (response.status === 401) element('auth').hidden = false;
+    if (response.status === 401) throw new Error('请先在本机打开 Cairn 工作台，再查看 Agent 窗口。');
     const body = await response.json(); throw new Error(body.detail || `HTTP ${response.status}`);
   }
   return response;
@@ -53,7 +53,6 @@ async function refresh() {
   } catch (e) { element('error').textContent = e.message; }
   finally { busy = false; }
 }
-element('auth').addEventListener('submit', event => { event.preventDefault(); sessionStorage.setItem('cairn.operatorToken', element('token').value.trim()); element('token').value = ''; element('auth').hidden = true; refresh(); });
 element('channel').addEventListener('change', refresh);
 element('raw').addEventListener('change', () => { element('output').textContent = readable(lastText); });
 refresh();

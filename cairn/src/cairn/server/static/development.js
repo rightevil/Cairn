@@ -1,40 +1,12 @@
 function developmentFeatures() {
   return {
-    operatorToken: sessionStorage.getItem('cairn.operatorToken') || '',
     developmentState: { runs: [], events: [], operations: [] },
     developmentError: '',
     developmentProjectId: '',
     developmentNow: Date.now(),
-    newDevelopment: { enabled: true, phase: 'design', repository: '', integration_branch: '', delivery: 'github', design: '', checks: '' },
     developmentControl: { kind: 'suggestion', content: '', scope: '', replaces: '' },
+    controlSending: false,
     developmentArtifact: { open: false, name: '', text: '' },
-
-    saveOperatorToken() {
-      if (this.operatorToken.trim()) sessionStorage.setItem('cairn.operatorToken', this.operatorToken.trim());
-      else sessionStorage.removeItem('cairn.operatorToken');
-      this.operatorToken = this.operatorToken.trim();
-      if (this.selectedProjectId) this.loadDevelopment(this.selectedProjectId);
-    },
-
-    developmentConfiguration() {
-      if (!this.newDevelopment.enabled) return null;
-      if (!this.newDevelopment.repository.trim()) throw new Error('请输入仓库的绝对路径');
-      const checks = this.newDevelopment.checks.trim() ? JSON.parse(this.newDevelopment.checks) : [];
-      if (!Array.isArray(checks) || checks.some(argv => !Array.isArray(argv) || !argv.length || argv.some(arg => typeof arg !== 'string' || !arg.trim()))) {
-        throw new Error('检查命令应为参数数组，例如 [["python", "-m", "pytest", "-q"]]');
-      }
-      this.saveOperatorToken();
-      return { repository: this.newDevelopment.repository.trim(), integration_branch: this.newDevelopment.integration_branch.trim(),
-        phase: this.newDevelopment.phase || 'design', delivery: this.newDevelopment.delivery, design: this.newDevelopment.design.trim() || this.newProject.goal, checks };
-    },
-
-    async setDevelopmentDelivery(mode) {
-      try {
-        await this.api('PUT', `/projects/${this.selectedProjectId}/development/delivery`, { delivery: mode });
-        await this.loadProject(this.selectedProjectId);
-        this.showToast(mode === 'local' ? '已使用本地审查合并，不上传代码' : '已使用 GitHub PR 交付');
-      } catch (error) { this.showToast(error.message, 'error'); }
-    },
 
     async loadDevelopment(id) {
       this.developmentNow = Date.now();
@@ -43,16 +15,13 @@ function developmentFeatures() {
         this.developmentProjectId = id;
       }
       if (!this.project?.project?.development) return;
-      if (!this.operatorToken) {
-        this.developmentError = '在本地设置中填写操作令牌，即可查看运行证据和添加调整。令牌文件路径由服务启动时显示。';
-        return;
-      }
       try {
         const result = await this.api('GET', `/projects/${id}/development`);
-        if (this.selectedProjectId === id) this.developmentState = result;
+        if (this.selectedProjectId !== id) return;
+        this.developmentState = result;
         if (this.selectedProjectId === id && this.loadDesign) await this.loadDesign(id);
-        this.developmentError = '';
-      } catch (error) { this.developmentError = error.message; }
+        if (this.selectedProjectId === id) this.developmentError = '';
+      } catch (error) { if (this.selectedProjectId === id) this.developmentError = error.message; }
     },
 
     developmentWork() {
@@ -147,18 +116,22 @@ function developmentFeatures() {
     },
 
     async submitDevelopmentControl() {
-      if (!this.developmentControl.content.trim()) return;
+      if (!this.developmentControl.content.trim() || this.controlSending) return;
+      const projectId = this.selectedProjectId, kind = this.developmentControl.kind;
+      this.controlSending = true;
       try {
-        await this.api('POST', `/projects/${this.selectedProjectId}/development/controls`, {
+        await this.api('POST', `/projects/${projectId}/development/controls`, {
           kind: this.developmentControl.kind, content: this.developmentControl.content.trim(),
           scope: this.developmentControl.scope ? [this.developmentControl.scope] : [], replaces: this.developmentControl.replaces || null,
         });
+        if (this.selectedProjectId !== projectId) return;
         this.developmentControl.content = '';
         this.developmentControl.replaces = '';
         await this.loadProject(this.selectedProjectId);
         this.updateGraph();
-        this.showToast(this.developmentControl.kind === 'directive' ? '指令已采纳，等待安全检查点生效' : '建议已提交独立评估');
+        this.showToast(kind === 'directive' ? '指令已采纳，等待安全检查点生效' : '建议已提交独立评估');
       } catch (error) { this.showToast(error.message, 'error'); }
+      finally { this.controlSending = false; }
     },
 
     async revokeDevelopmentControl(id) {
@@ -187,9 +160,7 @@ function developmentFeatures() {
 
     async openDevelopmentPreview(url, name) {
       try {
-        const result = await fetch(url, {
-          headers: { 'X-Cairn-Operator-Token': this.operatorToken }
-        });
+        const result = await fetch(url);
         if (!result.ok) throw new Error(this.requestError((await result.json()).detail || `HTTP ${result.status}`));
         this.developmentArtifact = { open: true, name, text: await result.text() };
       } catch (error) { this.showToast(error.message, 'error'); }

@@ -179,7 +179,8 @@ async def run_turn(dispatcher, project, intent, worker, run, directory, snapshot
                 if finished is None:
                     owner.cancel()
         watcher = asyncio.create_task(watch())
-        streamed = set()
+        streamed = {}
+        active_text_block = None
         text_message = 0
         try:
             async for message in client.receive_response():
@@ -192,14 +193,28 @@ async def run_turn(dispatcher, project, intent, worker, run, directory, snapshot
                     event = message.event
                     if event.get("type") == "content_block_delta" and event.get("delta", {}).get("type") == "text_delta":
                         block = str(event.get("index", 0))
-                        streamed.add(block)
+                        streamed[block] = streamed.get(block, "") + event["delta"]["text"]
                         await asyncio.to_thread(emit, "text", {"block": run["id"] + ":" + str(text_message) + ":" + block, "text": event["delta"]["text"]})
                     elif event.get("type") == "message_start":
                         streamed.clear()
+                        active_text_block = None
                         text_message += 1
+                    elif event.get("type") == "content_block_start" and event.get("content_block", {}).get("type") == "text":
+                        active_text_block = str(event.get("index", 0))
+                        streamed.setdefault(active_text_block, "")
                 elif isinstance(message, AssistantMessage):
-                    for index, block in enumerate(message.content):
-                        if isinstance(block, TextBlock) and str(index) not in streamed:
+                    text_blocks = [block for block in message.content if isinstance(block, TextBlock)]
+                    indices = list(streamed)
+                    for index, block in enumerate(text_blocks):
+                        if block.text in streamed.values():
+                            continue
+                        # SDK AssistantMessage contains a completed block, not the stream's thinking/tool indices.
+                        stream_index = active_text_block if len(text_blocks) == 1 else indices[index] if index < len(indices) else None
+                        if stream_index is not None:
+                            key = run["id"] + ":" + str(text_message) + ":" + stream_index
+                            streamed[stream_index] = block.text
+                            await asyncio.to_thread(emit, "text", {"block": key, "text": block.text, "mode": "snapshot"})
+                        else:
                             await asyncio.to_thread(emit, "text", {"block": run["id"] + ":" + str(sequence), "text": block.text})
                 elif isinstance(message, ResultMessage):
                     finished = message

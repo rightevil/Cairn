@@ -1,18 +1,10 @@
-# Host CLI execution, with both model tiers routed through your Magpie installation.
-# Set MAGPIE_ANTHROPIC_BASE_URL, MAGPIE_API_KEY, MAGPIE_STRONG_MODEL,
-# MAGPIE_STANDARD_MODEL in the dispatcher's environment. No keys are stored here.
-# Use the actual endpoint/model IDs configured in Magpie; do not append /v1/messages.
-# env_from values are ENVIRONMENT VARIABLE NAMES, not URLs or model IDs.
-# To write literal values, replace env_from with env, for example:
-# env:
-#   ANTHROPIC_BASE_URL: 'http://127.0.0.1:3425'
-#   ANTHROPIC_AUTH_TOKEN: 'your-magpie-key'
-#   ANTHROPIC_MODEL: 'group/your-model-id'
+# The single dispatcher example. Runtime values come from start-cairn.ps1.
 server: http://127.0.0.1:8000
+worker_token_file: .cairn/data/cairn.worker-token
 
 runtime:
   execution: local
-  worker_healthcheck: disabled  # startup still checks the CLI executable
+  worker_healthcheck: disabled
   prompt_group: development
   max_workers: 3
   max_project_workers: 3
@@ -21,24 +13,21 @@ runtime:
   healthcheck_timeout: 15
 
 local:
-  workspace_root: .cairn/workspaces  # relative to this YAML, retained on stop/completion
+  workspace_root: .cairn/workspaces
   completed_action: keep
 
-# Local BMAD main repository and Matt Pocock's skills repository.
-# Copies are isolated per design session and pinned to their current Git commits.
 design:
   bmad_repository: ../BMAD-METHOD
   grilling_repository: ../skills
 
-# Only single-call/process timeouts; no project budget or cumulative attempt limit.
+common_env:
+  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1'
+
 tasks:
   development_timeout: 3600
   bootstrap: {timeout: 120, conclude_timeout: 30}
   reason: {timeout: 45}
   explore: {timeout: 600, conclude_timeout: 120}
-
-# Optional for a nondefault serve --db-path; otherwise the default DB credential is read.
-# worker_token_file: .cairn/cairn.worker-token
 
 workers:
   - name: strong-design
@@ -51,8 +40,6 @@ workers:
       ANTHROPIC_BASE_URL: MAGPIE_ANTHROPIC_BASE_URL
       ANTHROPIC_AUTH_TOKEN: MAGPIE_API_KEY
       ANTHROPIC_MODEL: MAGPIE_STRONG_MODEL
-    # Windows: npm .cmd shims resolve to the native .exe or legacy Node entry.
-    # For another installation, set a native argv prefix with absolute paths:
 
   - name: standard-development
     type: claudecode
@@ -64,7 +51,3 @@ workers:
       ANTHROPIC_BASE_URL: MAGPIE_ANTHROPIC_BASE_URL
       ANTHROPIC_AUTH_TOKEN: MAGPIE_API_KEY
       ANTHROPIC_MODEL: MAGPIE_STANDARD_MODEL
-
-# Existing alternatives: type: codex (CODEX_MODEL, CODEX_BASE_URL, OPENAI_API_KEY),
-# type: pi (PI_MODEL, PI_BASE_URL, PI_API_KEY, PI_PROVIDER_API).
-# Use separate role profiles, not two dispatchers for the same project.

@@ -32,16 +32,15 @@ Cairn is a general-purpose problem-solving engine. <br/>It defines no roles, no 
 
 ## This fork: unattended software development
 
-新增方案设计阶段（本地文档）：网页直接对话，由 Claude Code 自动编排
+新增方案设计阶段：网页直接对话，由 Claude Code 自动编排
 BMAD 主仓库与 Grilling；设计草案经独立评审和用户确认后，直接成为 Cairn 原生任务。
 
 本 fork 增加了面向软件开发的无人值守闭环：Magpie 按角色提供强／普通模型，
 复用 Claude Code、Codex 和已有 Pi；功能分支独立开发，经过独立审查、串行 PR
 合并与集成验证。原有网页图谱新增开发面板、建议／指令、运行日志和证据入口。
 
-从 中文使用指南（本地文档） 和
-[开发配置示例](dispatch.example.yaml) 开始；
-实现与验证清单（本地文档） 说明实际覆盖范围。
+运行配置参考唯一的 [dispatch.example.yaml](dispatch.example.yaml)。
+使用指南与实现说明保留在本地 `docs/`，不随仓库发布。
 下文保留上游通用探索模式的介绍；其中的无固定角色、容器和渗透测试描述适用于该模式。
 
 <p align="center">
@@ -153,7 +152,7 @@ Supported worker backends: **Claude Code**, **Codex**, and **Pi**.
 
 ### Pull required images
  
-Both setup methods require the worker container image:
+Container execution requires the worker image; host execution does not:
  
 ```bash
 docker pull --platform=linux/amd64 ghcr.io/oritera/cairn-worker-container:latest
@@ -165,7 +164,11 @@ Create your local dispatcher configuration and fill in your LLM endpoints and AP
 cp dispatch.example.yaml dispatch.yaml
 ```
  
-### Docker Compose (recommended)
+### Docker Compose (container mode)
+
+The single example defaults to host development. Before using container dispatch,
+adapt your local `dispatch.yaml`: select `runtime.execution: container`, configure
+the container and exploration workers, and set `server: http://cairn-server:8000`.
  
 Pull the base image used to build Cairn:
  
@@ -183,7 +186,7 @@ This starts `cairn-server` on port `8000` and `cairn-dispatcher` once the server
  
 ```bash
 # Start the server
-uv run --project cairn cairn serve
+uv run --project cairn cairn serve --db-path .cairn/data/cairn.db
  
 # Run the dispatcher
 uv run --project cairn cairn dispatch --config dispatch.yaml
@@ -200,13 +203,13 @@ Instead of one container per project, workers can run directly on the dispatcher
 cp dispatch.example.yaml dispatch.yaml
 
 # Start the server
-uv run --project cairn cairn serve
+uv run --project cairn cairn serve --db-path .cairn/data/cairn.db
 
 # Run the dispatcher on the same host, where the CLIs are installed and logged in
 uv run --project cairn cairn dispatch --config dispatch.yaml
 ```
 
-Local mode is selected by `runtime.execution: local` (see `dispatch.example.yaml`). On startup the dispatcher checks each configured worker CLI is installed and runnable, and reminds you they must already be logged in. Each project gets an isolated working directory under `local.workspace_root` (default: the dispatcher's current directory). Run the dispatcher directly on the host — not inside Docker — since the agents run with your user's permissions and no sandbox.
+Local mode is selected by `runtime.execution: local` (see `dispatch.example.yaml`). Set the Magpie environment values in your local startup script before launching. On startup the dispatcher checks each configured worker CLI is installed and runnable. Each project gets an isolated working directory under `local.workspace_root`. Run the dispatcher directly on the host, not inside Docker.
 
 ### Tests
 

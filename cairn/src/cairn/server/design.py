@@ -167,6 +167,9 @@ def send(project_id: str, body: Message):
             if question.id in body.answers:
                 question.answer_message_id = mid
         save(conn, project_id, draft)
+        remaining = [q.id for q in draft.questions if q.answer is None]
+        if body.answers and remaining:
+            return {"id": mid, "intent_id": None, "remaining_questions": remaining}
         intent = store.add_intent(conn, project_id, "Design conversation", WorkPackage(
             role="planner", purpose="design", revision=config.revision, result={"message_id": mid}))
         return {"id": mid, "intent_id": intent}
@@ -212,13 +215,16 @@ def update(project_id: str, run_id: str, body: AgentUpdate):
         elif body.kind == "answers":
             message = conn.execute("SELECT id,data FROM design_messages WHERE project_id=? AND id=? AND kind='user'",
                                    (project_id, value.result["message_id"])).fetchone()
-            content = json.loads(message["data"])["content"] if message else ""
+            user_message = json.loads(message["data"]) if message else {}
+            content = user_message.get("content", "")
             answers = body.data.get("answers", [])
             if not isinstance(answers, list) or not answers or any(not isinstance(a, dict) or not isinstance(a.get("quote"), str) for a in answers):
                 raise HTTPException(422, "Provide exact quotes from the current user message")
             for answer in answers:
                 q = next((q for q in draft.questions if q.id == answer.get("id")), None)
                 quote = answer.get("quote", "")
+                if user_message.get("answers") and answer.get("id") not in user_message["answers"]:
+                    raise HTTPException(409, "A card answer applies only to its explicitly selected question")
                 if not q or q.answer is not None or not quote.strip() or quote not in content or message["id"] <= q.asked_after:
                     raise HTTPException(409, "Answers must quote current user input after the question was asked")
                 if any(not next((prior.answer for prior in draft.questions if prior.id == dep), None) for dep in q.depends_on):
@@ -381,6 +387,8 @@ def publish(project_id: str, body: Version):
         config.architecture = draft.documents.get("architecture", config.architecture)
         config.design_revision += 1
         config.phase = "execution"
+        conn.execute("UPDATE facts SET description=? WHERE project_id=? AND id='goal'",
+                     (draft.documents.get("requirements") or draft.documents.get("brief") or config.design, project_id))
         store.save_project(conn, project_id, config)
         try:
             count = install_plan(conn, project_id, DevelopmentOutcome(kind="plan", summary="Approved design", work=draft.work), config.revision)

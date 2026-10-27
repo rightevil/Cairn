@@ -42,7 +42,8 @@ def test_bmad_scripts_are_argv_only_and_workspace_confined(tmp_path, monkeypatch
 
 
 @pytest.mark.parametrize('resume,content', [(None, 'Design the feature'), ('existing-session', '/bmad-architecture')])
-def test_sdk_turn_automatically_orchestrates_and_resumes_with_persisted_questions(tmp_path, monkeypatch, resume, content):
+@pytest.mark.parametrize('text_index,partial,turns,bundled', [(0, 'Question', 1, False), (1, 'Question', 1, False), (3, 'Quest', 1, False), (1, 'Question', 2, False), (1, 'Fir', 1, True)])
+def test_sdk_turn_automatically_orchestrates_and_resumes_with_persisted_questions(tmp_path, monkeypatch, resume, content, text_index, partial, turns, bundled):
     workspace = tmp_path / 'project' / 'design-session'
     skill = workspace / '.claude/skills/cairn-design/SKILL.md'
     skill.parent.mkdir(parents=True)
@@ -81,9 +82,16 @@ def test_sdk_turn_automatically_orchestrates_and_resumes_with_persisted_question
             guard = captured['options'].hooks['PreToolUse'][0].hooks[0]
             captured['deny'] = await guard({'tool_name': 'Bash', 'tool_input': {'command': 'exit'}}, '', {})
             await guard({'tool_name': 'Skill', 'tool_input': {'skill': 'bmad-prd'}}, '', {})
-            yield sdk.StreamEvent('1', 'test', {'type': 'message_start'})
-            yield sdk.StreamEvent('2', 'test', {'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'text_delta', 'text': 'Question'}})
-            yield sdk.AssistantMessage([sdk.TextBlock('Question')], 'test')
+            for number in range(turns):
+                yield sdk.StreamEvent('1', 'test', {'type': 'message_start'})
+                yield sdk.StreamEvent('2', 'test', {'type': 'content_block_start', 'index': text_index, 'content_block': {'type': 'text'}})
+                yield sdk.StreamEvent('3', 'test', {'type': 'content_block_delta', 'index': text_index, 'delta': {'type': 'text_delta', 'text': partial}})
+                if bundled:
+                    yield sdk.StreamEvent('4', 'test', {'type': 'content_block_start', 'index': 3, 'content_block': {'type': 'text'}})
+                    yield sdk.StreamEvent('5', 'test', {'type': 'content_block_delta', 'index': 3, 'delta': {'type': 'text_delta', 'text': 'Sec'}})
+                    yield sdk.AssistantMessage([sdk.TextBlock('First'), sdk.TextBlock('Second')], 'test')
+                else:
+                    yield sdk.AssistantMessage([sdk.TextBlock('Question')], 'test')
             yield sdk.ResultMessage('success', 1, 1, False, 1, resume or 'new-session', result='Done')
         async def interrupt(self):
             captured['interrupt'] = True
@@ -101,7 +109,13 @@ def test_sdk_turn_automatically_orchestrates_and_resumes_with_persisted_question
     assert options.model == 'strong' and 'Skill' in options.tools and 'Bash' not in options.tools
     assert captured['prompt'].startswith(content if content.startswith('/') else '/cairn-design')
     assert captured['deny']['hookSpecificOutput']['permissionDecision'] == 'deny'
-    assert len([e for e in events if e['kind'] == 'text']) == 1
+    text_events = [e['data'] for e in events if e['kind'] == 'text']
+    assert len(text_events) == (4 if bundled else turns * (1 if partial == 'Question' else 2))
+    rendered = {}
+    for event in text_events:
+        key = event['block']
+        rendered[key] = event['text'] if event.get('mode') == 'snapshot' else rendered.get(key, '') + event['text']
+    assert list(rendered.values()) == (['First', 'Second'] if bundled else ['Question'] * turns)
     assert any(e['kind'] == 'questions' for e in events)
     assert any(e['kind'] == 'activity' and e['data']['skill'] == 'bmad-prd' for e in events)
     assert 'Explicit choice' in (workspace / 'context.json').read_text()

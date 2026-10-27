@@ -17,8 +17,12 @@ function designFeatures() {
       const data = item.data;
       if (item.kind === 'user') this.designEntries.push({ id: item.id, role: '你', text: data.content });
       if (item.kind === 'text') {
+        const previous = this.designEntries.at(-1);
+        const parts = String(data.block || '').split(':');
+        if (parts.length === 2 && previous?.role === 'Claude' && previous.block?.split(':').length === 3
+            && previous.block.split(':')[0] === parts[0] && previous.text === data.text) return;
         const existing = this.designEntries.find(e => e.block === data.block);
-        if (existing) existing.text += data.text;
+        if (existing) existing.text = data.mode === 'snapshot' ? data.text : existing.text + data.text;
         else this.designEntries.push({ id: item.id, block: data.block, role: 'Claude', text: data.text });
       }
       if (item.kind === 'activity') this.designEntries.push({ id: item.id, role: '工作流', text: [data.tool, data.skill].filter(Boolean).join(' · ') });
@@ -29,7 +33,7 @@ function designFeatures() {
     },
 
     async loadDesign(id) {
-      if (!this.operatorToken || this.selectedProjectId !== id) return;
+      if (this.selectedProjectId !== id) return;
       if (this.designProject !== id) {
         this.designStream?.abort(); this.designStream = null; this.designStreamProject = '';
         this.designProject = id; this.designEntries = []; this.designCursor = 0; this.designInput = '';
@@ -51,7 +55,7 @@ function designFeatures() {
       this.designStream = controller; this.designStreamProject = id;
       try {
         const response = await fetch(`/projects/${id}/development/design/events?after=${this.designCursor}`, {
-          headers: { 'X-Cairn-Operator-Token': this.operatorToken }, signal: controller.signal
+          signal: controller.signal
         });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const reader = response.body.getReader(), decoder = new TextDecoder();
@@ -78,6 +82,13 @@ function designFeatures() {
         .filter(c => c.name && !['theme', 'terminal-setup', 'login', 'logout'].includes(c.name) && c.name.toLowerCase().startsWith(prefix)).slice(0, 10);
     },
 
+    designMarkdown(text) {
+      return DOMPurify.sanitize(marked.parse(String(text || ''), { gfm: true, breaks: true }), {
+        USE_PROFILES: { html: true }, ALLOW_DATA_ATTR: false,
+        FORBID_TAGS: ['style', 'form', 'input', 'button', 'textarea', 'select', 'img'], FORBID_ATTR: ['style'],
+      });
+    },
+
     designKey(event) {
       if (event.isComposing) return;
       const commands = this.designCommands();
@@ -94,30 +105,36 @@ function designFeatures() {
       const text = question ? answer : this.designInput.trim();
       if (!text || this.designSending || this.designBusy()) return;
       this.designSending = true;
+      const projectId = this.selectedProjectId;
       const signature = JSON.stringify([text, question?.id || '']);
       if (signature !== this.designMessageSignature) { this.designMessageId = ''; this.designMessageSignature = signature; }
       this.designMessageId ||= crypto.randomUUID();
       try {
-        await this.api('POST', `/projects/${this.selectedProjectId}/development/design/messages`, {
+        await this.api('POST', `/projects/${projectId}/development/design/messages`, {
           id: this.designMessageId, content: question ? `${question.id}：${answer}` : text, answers: question ? { [question.id]: answer } : {}
         });
-        this.designMessageId = ''; this.designInput = '';
+        if (this.selectedProjectId !== projectId) return;
+        this.designMessageId = '';
+        if (!question) this.designInput = '';
         if (question) delete this.designAnswers[question.id];
         await this.loadProject(this.selectedProjectId);
-      } catch (e) { this.designError = e.message; }
+        if (question && this.selectedProjectId === projectId) this.$nextTick(() => this.$refs.questionAnswer?.focus());
+      } catch (e) { if (this.selectedProjectId === projectId) this.designError = e.message; }
       finally { this.designSending = false; }
     },
 
     async designAction(action) {
       if (this.designSending) return;
       this.designSending = true;
+      const projectId = this.selectedProjectId;
       try {
-        await this.api('POST', `/projects/${this.selectedProjectId}/development/design/${action}`, {
+        await this.api('POST', `/projects/${projectId}/development/design/${action}`, {
           version: this.designDraft.version, digest: this.designDraft.candidate.digest || ''
         });
+        if (this.selectedProjectId !== projectId) return;
         await this.loadProject(this.selectedProjectId);
-        if (action === 'publish') { this.sideTab = 'development'; this.showToast('已确认此版本，原生任务已交给 Cairn 执行'); }
-      } catch (e) { this.designError = e.message; }
+        if (action === 'publish') { this.setStage('development'); this.showToast('已确认此版本，原生任务已交给 Cairn 执行'); }
+      } catch (e) { if (this.selectedProjectId === projectId) this.designError = e.message; }
       finally { this.designSending = false; }
     },
 
