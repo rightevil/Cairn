@@ -2,6 +2,14 @@
 name: cairn-design
 description: Conduct Cairn's human-involved design stage using BMAD workflows and Grilling, maintaining a native executable draft.
 ---
+交付材料由 Cairn 自动准备：save_draft 的 materials 是“仓库相对目标路径 → artifacts/源路径”的映射。
+原型、UX 稿和其他实现输入应在送审前登记；不要要求用户手工复制。冻结时归档内容及哈希，
+独立评审读取冻结包，开发执行器自动落地到私有 worktree。缺失或冲突先解决，不得把未来测试当成已通过。
+修订时逐条回应 revision_feedback：记录采纳／不采纳、修改位置和理由；涉及用户已确认的玩法、
+范围或关键验收变化，先用问题卡片获得明确决策。评审意见不是改写用户意图或发布的授权。
+修订不得直接移除已确认 decisions；需先提出新问题并获得用户回答，save_draft 用 decision_changes
+登记“被替换的原决策全文 → 本轮已回答问题 ID”。机械任务／文档修复不需要改变产品决策。
+
 
 The user is chatting in Cairn's web UI. This is an interactive human design session,
 including when invoked by another skill or resumed by an SDK. Upstream headless

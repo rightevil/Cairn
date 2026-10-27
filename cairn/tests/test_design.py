@@ -97,7 +97,8 @@ def test_message_retries_are_idempotent_and_cannot_change_content(http, reposito
     assert http.post(url(project, '/messages'), headers=OPERATOR, json=body).status_code == 201
     assert http.post(url(project, '/messages'), headers=OPERATOR, json={**body, 'content': 'Changed'}).status_code == 409
     assert len(http.get(f'/projects/{project}').json()['intents']) == 1
-    assert http.post(url(project, '/messages'), headers=OPERATOR, json={'id': 'other', 'content': 'Another'}).status_code == 409
+    assert http.post(url(project, '/messages'), headers=OPERATOR, json={'id': 'other', 'content': 'Another'}).status_code == 201
+    assert len(http.get(f'/projects/{project}').json()['intents']) == 1
 
 
 def test_frontier_questions_require_explicit_operator_answers(http, repository):
@@ -234,7 +235,7 @@ def test_review_cannot_self_approve_or_claim_unrun_checks(http, repository, sess
     assert current['candidate']['review'] == 'pending'
 
 
-def test_independent_design_runtime_checks_baseline_without_running_future_tests(http, repository, tmp_path):
+def test_independent_design_runtime_checks_baseline_without_running_future_tests(http, repository, tmp_path, monkeypatch):
     import hashlib
     import sys
     from types import SimpleNamespace
@@ -259,8 +260,13 @@ def test_independent_design_runtime_checks_baseline_without_running_future_tests
     work = http.get(f'/projects/{project}').json()['intents']
     iid = next(i['id'] for i in work if i['work']['role'] == 'architect')
     run = claim(http, project, iid, role='architect').json()
-    fake = tmp_path / 'review.py'
-    fake.write_text('import json\nprint(json.dumps({"type":"result","session_id":"independent-runtime","result":json.dumps({"kind":"review","verdict":"approve","summary":"Reviewed frozen documents"})}))', encoding='utf-8')
+    from cairn.dispatcher import frozen_review
+    async def controlled_review(dispatcher, project, worker, run, directory, *args):
+        (directory / 'reports').mkdir()
+        (directory / 'stdout.log').write_text('Independent review output')
+        (directory / 'stderr.log').write_text('')
+        return json.dumps({'kind':'review','verdict':'approve','summary':'Reviewed frozen documents'}), 'independent-runtime'
+    monkeypatch.setattr(frozen_review, 'run_review', controlled_review)
     local = LocalConfig(workspace_root=str(tmp_path / 'runtime'))
     client = Client(http)
     loop = SimpleNamespace(client=client, config=SimpleNamespace(server='in-process', local=local,
@@ -269,7 +275,7 @@ def test_independent_design_runtime_checks_baseline_without_running_future_tests
     detail = client.get_project(project)
     intent = next(i for i in detail.intents if i.id == iid)
     worker = WorkerConfig(name='independent', type='claudecode', roles=['architect'], tier='strong',
-        command=[sys.executable, str(fake)], max_running=1, priority=0)
+        command=[sys.executable], max_running=1, priority=0)
     assert dispatcher.execute(detail, intent, worker, run, TaskCancellation()) == 'success'
     assert not marker.exists(), 'Design review must not execute planned implementation checks'
     http.post(f'/projects/{project}/development/advance', headers=WORKER)
@@ -338,7 +344,7 @@ def test_review_revision_restores_context_queues_once_and_requires_new_review(ht
     run = claim(http, project, queued[0]['id']).json()
     assert agent(http, project, run, 'session', {'session': draft['session'], 'baseline': draft['baseline']}).status_code == 200
     response = agent(http, project, run, 'draft', {'version': draft['version'], 'stage': 'plan',
-        'documents': draft['documents'], 'decisions': ['Addressed each review finding'], 'work': [task]})
+        'documents': draft['documents'], 'decisions': draft['decisions'] + ['Addressed each review finding'], 'work': [task]})
     assert response.status_code == 200, response.text
     finish(http, project, run, {'kind': 'design', 'summary': 'Revision saved'})
     again = freeze(http, project)
@@ -465,3 +471,121 @@ def test_free_text_answers_must_quote_new_user_input_not_agent_defaults(http, re
     assert agent(http, project, next_run, 'answers', {'answers': [{'id': 'Q1', 'quote': 'internal team'}]}).status_code == 200
     q = http.get(url(project), headers=OPERATOR).json()['draft']['questions'][0]
     assert q['answer'] == 'internal team' and q['answer_message_id']
+
+
+def test_materials_freeze_before_review_and_materialize_without_manual_copy(http, repository, tmp_path):
+    from cairn.server.design import load, save
+    from cairn.dispatcher.runtime.design_artifacts import export_artifacts
+    from cairn.server.design_materials import materialize_materials
+    project, _, _, _ = ready(http, repository)
+    source = tmp_path / 'artifacts'
+    source.mkdir()
+    (source / 'key-deployment.html').write_text('<h1>Approved prototype</h1>')
+    export_artifacts(source, repository)
+    with db.get_conn() as conn:
+        draft = load(conn, project)
+        draft.documents['ux'] = 'Use key-deployment.html in test/fixtures/ux/ before implementation.'
+        save(conn, project, draft)
+    draft = freeze(http, project)
+    materials = draft['prepared_materials']
+    assert len(materials) == 1 and materials[0]['target'] == 'test/fixtures/ux/key-deployment.html'
+    assert not (repository / materials[0]['target']).exists()
+    (repository / '.cairn/artifacts/key-deployment.html').write_text('Later edits')
+    workspace = tmp_path / 'private-worktree'
+    workspace.mkdir()
+    materialize_materials(repository, workspace, materials)
+    target = workspace / materials[0]['target']
+    assert target.read_text() == '<h1>Approved prototype</h1>'
+    target.write_text('User edits')
+    with pytest.raises(ValueError, match='Preserving'):
+        materialize_materials(repository, workspace, materials)
+    assert target.read_text() == 'User edits'
+
+
+def test_materials_readiness_reports_missing_source_and_rejects_escape(http, repository):
+    from cairn.server.design import load, save
+    project, _, _, _ = ready(http, repository)
+    with db.get_conn() as conn:
+        draft = load(conn, project)
+        draft.materials = {'test/fixtures/ux/a.html':'artifacts/missing.html'}
+        save(conn, project, draft)
+    state = http.get(url(project), headers=OPERATOR).json()
+    assert not state['readiness']['ready'] and any('missing.html' in s for s in state['readiness']['issues'])
+    with db.get_conn() as conn:
+        draft = load(conn, project)
+        draft.materials = {'../outside.html':'artifacts/missing.html'}
+        save(conn, project, draft)
+    assert any('越界' in s for s in http.get(url(project), headers=OPERATOR).json()['readiness']['issues'])
+
+
+def test_live_guidance_uses_one_writer_and_survives_result_boundary(http, repository):
+    project = create_design(http, repository)
+    iid = send(http, project)
+    run = claim(http, project, iid).json()
+    endpoint = url(project, '/runs/' + run['id'] + '/inputs')
+    def delivery(action, ids=None):
+        response = http.post(endpoint, headers=WORKER, json={'token':run['token'],'action':action,'message_ids':ids or []})
+        assert response.status_code == 200, response.text
+        return response.json()
+    delivery('start')
+    response = http.post(url(project,'/messages'),headers=OPERATOR,json={'id':'guide-1','content':'Preserve scope'})
+    assert response.status_code == 201 and response.json()['intent_id'] == iid
+    guide = response.json()['id']
+    assert len(http.get(f'/projects/{project}').json()['intents']) == 1
+    batch = delivery('take')['items']
+    assert [m['id'] for m in batch] == [guide]
+    assert not delivery('take')['items'], 'A taken message must not be delivered twice'
+    delivery('delivered',[guide])
+    assert delivery('close')['closed']
+    late = http.post(url(project,'/messages'),headers=OPERATOR,json={'id':'guide-2','content':'Late guidance'}).json()
+    assert late['intent_id'] != iid
+    assert claim(http,project,late['intent_id']).status_code == 409, 'Do not spawn another writer beside a live session'
+    finish(http,project,run,{'kind':'design','summary':'Saved'})
+    assert claim(http,project,late['intent_id']).status_code == 200
+    states = http.get(url(project),headers=OPERATOR).json()['deliveries']
+    assert states[str(guide)] == 'delivered' and states[str(late['id'])] == 'queued'
+
+
+def test_uncertain_guidance_is_not_silently_replayed_after_failure(http, repository):
+    project = create_design(http,repository)
+    iid = send(http,project)
+    run = claim(http,project,iid).json()
+    guide = http.post(url(project,'/messages'),headers=OPERATOR,json={'id':'uncertain','content':'Direction'}).json()['id']
+    endpoint = url(project,'/runs/'+run['id']+'/inputs')
+    http.post(endpoint,headers=WORKER,json={'token':run['token'],'action':'start'})
+    http.post(endpoint,headers=WORKER,json={'token':run['token'],'action':'take'})
+    finish(http,project,run,{},outcome='failed')
+    assert http.get(url(project),headers=OPERATOR).json()['deliveries'][str(guide)] == 'uncertain'
+    send(http,project,mid='resume',content='Resume the saved design')
+    with db.get_conn() as conn:
+        row = conn.execute('SELECT intent_id,state FROM design_inputs WHERE message_id=?',(guide,)).fetchone()
+        assert row['intent_id'] == iid and row['state'] == 'uncertain'
+
+
+def test_actual_session_groups_do_not_merge_agents_by_worker_name(http, repository):
+    project,_,_,_ = ready(http,repository)
+    draft = freeze(http,project)
+    review(http,project,draft,verdict='request_changes')
+    data=http.get(f'/projects/{project}/development',headers=OPERATOR).json()
+    assert len(data['sessions']) == 2
+    assert sum(s['main'] for s in data['sessions']) == 1
+    assert {s['session'] for s in data['sessions']} == {'author','independent'}
+
+
+def test_revision_cannot_remove_confirmed_decision_without_new_user_answer(http,repository):
+    project,_,_,task=ready(http,repository)
+    frozen=freeze(http,project)
+    review(http,project,frozen,verdict='request_changes')
+    draft=http.post(url(project,'/reopen'),headers=OPERATOR,json={'version':frozen['version']}).json()
+    iid=next(i['id'] for i in http.get(f'/projects/{project}').json()['intents'] if i['work']['purpose']=='design' and i['work']['state']=='ready')
+    run=claim(http,project,iid).json()
+    response=agent(http,project,run,'draft',{'version':draft['version'],'decisions':[]})
+    assert response.status_code==409 and 'confirmed decision' in response.text
+    response=agent(http,project,run,'questions',{'questions':[{'id':'change-decision','text':'Replace the prior decision?'}]})
+    assert response.status_code==200
+    answer=http.post(url(project,'/messages'),headers=OPERATOR,json={'id':'explicit-decision','content':'Replace the prior decision','answers':{'change-decision':'Yes, replace it'}})
+    assert answer.status_code==201
+    current=http.get(url(project),headers=OPERATOR).json()['draft']
+    response=agent(http,project,run,'draft',{'version':current['version'],'decisions':['New explicitly approved decision'],
+        'decision_changes':{'Preserve existing behavior':'change-decision'}},eid='changed-decision')
+    assert response.status_code==200,response.text

@@ -40,6 +40,7 @@ class DevelopmentProject(DevelopmentModel):
     design: str = Field(min_length=1)
     architecture: str = ""
     design_revision: int = Field(default=1, ge=1)
+    design_materials: list[dict[str, str]] = Field(default_factory=list)
     architecture_control_revision: int = Field(default=1, ge=1)
     milestone: str = ""
     checks: list[list[str]] = Field(default_factory=list)

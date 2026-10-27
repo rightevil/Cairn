@@ -28,6 +28,7 @@ function cairnApp() {
       });
       await this.loadProjects();
       await this.route();
+      setInterval(() => { if (this.selectedAgentSession()) this.loadAgentConversation(); }, 1000);
       window.addEventListener('hashchange', () => this.route());
       setInterval(async () => {
         if (this.polling) return;
@@ -105,6 +106,7 @@ function cairnApp() {
       this.developmentControl = { kind: 'suggestion', content: '', scope: '', replaces: '' };
       this.designDraft = designFeatures().designDraft; this.designEntries = []; this.designError = '';
       this.fileSuggestions = [];
+      this.agentSessionKey = ''; this.agentRunTexts = {};
       this.view = 'graph'; this.loadingProject = true; this.panelOpen = true;
       this.sideTab = stage === 'development' ? 'development' : stage === 'design' ? 'design'
         : this.projects.find(p => p.id === id)?.development?.phase === 'design' ? 'design' : 'development';
@@ -127,6 +129,7 @@ function cairnApp() {
     },
 
     setStage(stage, navigate = true) {
+      this.agentSessionKey = '';
       this.sideTab = stage === 'development' ? 'development' : 'design';
       this.fileSuggestions = [];
       if (navigate) location.hash = new URLSearchParams({ project: this.selectedProjectId, stage: this.sideTab }).toString();

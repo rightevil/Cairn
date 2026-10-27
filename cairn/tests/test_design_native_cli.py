@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -17,8 +18,10 @@ from test_development_runtime import repository
 pytestmark = pytest.mark.skipif(os.environ.get('CAIRN_NATIVE_CLAUDE_TEST') != '1', reason='Opt-in native Claude integration')
 
 
-def test_actual_claude_invokes_skills_and_persists_question(repository, tmp_path):
+@pytest.mark.parametrize("guidance_phase", ["tool", "text", "boundary"])
+def test_actual_claude_invokes_skills_and_persists_question(repository, tmp_path, guidance_phase):
     calls, events = [], []
+    guidance = {"available":False, "delivered":False, "observed":False}
     responses = [('Skill', {'skill': 'cairn-design'}), ('Skill', {'skill': 'bmad-product-brief'}),
                  ('Skill', {'skill': 'grilling'}), ('mcp__cairn__ask_questions', {'questions': [
                      {'id': 'Q1', 'text': 'Who is the first user?', 'recommendation': 'Internal team', 'options': ['Internal team', 'External users']}]} )]
@@ -32,6 +35,7 @@ def test_actual_claude_invokes_skills_and_persists_question(repository, tmp_path
                 data = b'{"input_tokens":100}'
                 self.send_response(200); self.send_header('Content-Type', 'application/json'); self.send_header('Content-Length', str(len(data))); self.end_headers(); self.wfile.write(data)
                 return
+            if 'LOCAL_GUIDANCE' in json.dumps(body): guidance['observed'] = True
             index = len(calls)
             calls.append([tool['name'] for tool in body.get('tools', [])])
             tool = responses[index] if index < len(responses) else None
@@ -46,7 +50,15 @@ def test_actual_claude_invokes_skills_and_persists_question(repository, tmp_path
                       ('message_delta', {'type': 'message_delta', 'delta': {'stop_reason': 'tool_use' if tool else 'end_turn', 'stop_sequence': None}, 'usage': {'output_tokens': 20}}),
                       ('message_stop', {'type': 'message_stop'})]
             data = ''.join('event: ' + kind + '\ndata: ' + json.dumps(payload) + '\n\n' for kind, payload in frames).encode()
-            self.send_response(200); self.send_header('Content-Type', 'text/event-stream'); self.send_header('Content-Length', str(len(data))); self.end_headers(); self.wfile.write(data)
+            self.send_response(200); self.send_header('Content-Type', 'text/event-stream'); self.send_header('Content-Length', str(len(data))); self.end_headers()
+            if guidance_phase == 'text' and index == len(responses):
+                split = data.index(b'event: content_block_stop')
+                self.wfile.write(data[:split]); self.wfile.flush()
+                guidance['available'] = True
+                time.sleep(.5)
+                self.wfile.write(data[split:])
+            else:
+                self.wfile.write(data)
 
     server = ThreadingHTTPServer(('127.0.0.1', 0), Model)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -61,6 +73,15 @@ def test_actual_claude_invokes_skills_and_persists_question(repository, tmp_path
         if action.startswith('design?'):
             return {'draft': {'session': saved_session[0], 'baseline': '', 'version': 0}, 'messages': [
                 {'id': current_input[0], 'kind': 'user', 'data': {'content': 'Help design a feature' if current_input[0] == 1 else 'The first user is the internal team', 'answers': {}}}]}
+        if action.endswith('/inputs'):
+            if current_input[0] == 1 and not guidance['delivered'] and (
+                    payload['action'] == 'take' and guidance['available'] or payload['action'] == 'close' and guidance_phase == 'boundary'):
+                guidance['delivered'] = True
+                return {'items':[{'id':20,'data':{'content':'LOCAL_GUIDANCE: preserve the agreed scope'}}], 'closed':False}
+            return {'items': [], 'closed': payload['action'] == 'close'}
+        if guidance_phase == 'tool' and payload.get('kind') == 'questions' and current_input[0] == 1:
+            guidance['available'] = True
+            time.sleep(.5)
         events.append((action, payload))
         return {'version': 1}
     dispatcher = SimpleNamespace(directory=tmp_path, config=SimpleNamespace(design=DesignConfig(
@@ -70,22 +91,70 @@ def test_actual_claude_invokes_skills_and_persists_question(repository, tmp_path
     directory.mkdir(parents=True)
     try:
         output, session = asyncio.run(asyncio.wait_for(run_turn(dispatcher,
-            SimpleNamespace(project=SimpleNamespace(id='native-test'), hints=[]),
+            SimpleNamespace(project=SimpleNamespace(id='native-test', development=SimpleNamespace(repository=str(repository))), hints=[]),
             SimpleNamespace(work=SimpleNamespace(result={'message_id': 1})), worker,
             {'id': 'native-run', 'token': 'local-lease'}, directory, repository, TaskCancellation()), 60))
         saved_session[0], current_input[0] = session, 2
         resumed_directory = tmp_path / 'runs' / 'resumed-run'
         resumed_directory.mkdir()
         resumed, resumed_session = asyncio.run(asyncio.wait_for(run_turn(dispatcher,
-            SimpleNamespace(project=SimpleNamespace(id='native-test'), hints=[]),
+            SimpleNamespace(project=SimpleNamespace(id='native-test', development=SimpleNamespace(repository=str(repository))), hints=[]),
             SimpleNamespace(work=SimpleNamespace(result={'message_id': 2})), worker,
             {'id': 'resumed-run', 'token': 'next-lease'}, resumed_directory, repository, TaskCancellation()), 60))
         assert resumed['kind'] == 'design' and resumed_session == session
     finally:
+        (tmp_path / 'guidance-state.json').write_text(json.dumps(guidance))
         server.shutdown(); server.server_close(); thread.join(timeout=3)
+    assert guidance['delivered'] and guidance['observed'], 'Guidance must reach the actual native CLI model stream'
     assert output['kind'] == 'design' and session
     assert any(payload.get('pid') for action, payload in events if action.endswith('/heartbeat'))
     activities = [p['data'].get('skill') for _, p in events if p.get('kind') == 'activity']
     assert {'cairn-design', 'bmad-product-brief', 'grilling'} <= set(activities)
     assert any(p.get('kind') == 'questions' and p['data']['questions'][0]['id'] == 'Q1' for _, p in events)
     assert calls and any('mcp__cairn__ask_questions' in tools for tools in calls)
+
+
+def test_actual_review_cli_denies_source_edits_but_can_write_own_report(repository,tmp_path):
+    from cairn.dispatcher.frozen_review import run_review
+    run_dir=tmp_path/'review-run'; run_dir.mkdir()
+    context=run_dir/'context.json'; context.write_text('{}')
+    original=(repository/'README.md').read_bytes()
+    report=run_dir/'reports'/'review.md'
+    requests=[]
+    class Reviewer(BaseHTTPRequestHandler):
+        def log_message(self,*args): pass
+        def do_POST(self):
+            body=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+            if 'count_tokens' in self.path:
+                data=b'{"input_tokens":100}'
+                self.send_response(200);self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data);return
+            index=len(requests); requests.append(body)
+            tools=[('Write',{'file_path':str(repository/'README.md'),'content':'Unauthorized overwrite'}),
+                   ('Write',{'file_path':str(report),'content':'# Independent findings'})]
+            chosen=tools[index] if index<len(tools) else None
+            result=json.dumps({'kind':'review','verdict':'request_changes','summary':'Independent findings recorded'})
+            block={'type':'tool_use','id':f'tool_{index}','name':chosen[0],'input':{}} if chosen else {'type':'text','text':''}
+            frames=[('message_start',{'type':'message_start','message':{'id':f'msg_{index}','type':'message','role':'assistant','model':body['model'],'content':[],'stop_reason':None,'stop_sequence':None,'usage':{'input_tokens':100,'output_tokens':0}}}),
+                ('content_block_start',{'type':'content_block_start','index':0,'content_block':block}),
+                ('content_block_delta',{'type':'content_block_delta','index':0,'delta':{'type':'input_json_delta','partial_json':json.dumps(chosen[1])} if chosen else {'type':'text_delta','text':result}}),
+                ('content_block_stop',{'type':'content_block_stop','index':0}),
+                ('message_delta',{'type':'message_delta','delta':{'stop_reason':'tool_use' if chosen else 'end_turn','stop_sequence':None},'usage':{'output_tokens':20}}),
+                ('message_stop',{'type':'message_stop'})]
+            data=''.join('event: '+name+'\ndata: '+json.dumps(data)+'\n\n' for name,data in frames).encode()
+            self.send_response(200);self.send_header('Content-Type','text/event-stream');self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data)
+    server=ThreadingHTTPServer(('127.0.0.1',0),Reviewer)
+    thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+    worker=WorkerConfig(name='review',type='claudecode',roles=['architect'],tier='strong',max_running=1,priority=0,
+        env={'ANTHROPIC_BASE_URL':f'http://127.0.0.1:{server.server_port}','ANTHROPIC_AUTH_TOKEN':'local-test-only','ANTHROPIC_API_KEY':'',
+             'ANTHROPIC_MODEL':'claude-sonnet-4-6','CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC':'1','HTTP_PROXY':'','HTTPS_PROXY':'','ALL_PROXY':'','NO_PROXY':'127.0.0.1,localhost'})
+    dispatcher=SimpleNamespace(call=lambda *args: {})
+    project=SimpleNamespace(project=SimpleNamespace(id='test',development=SimpleNamespace(repository=str(repository))))
+    try:
+        result,session=asyncio.run(asyncio.wait_for(run_review(dispatcher,project,worker,{'id':'review-run','token':'local'},run_dir,repository,
+            'Read the context and report findings as JSON: '+str(context),context,TaskCancellation()),40))
+    finally:
+        server.shutdown();server.server_close();thread.join(timeout=3)
+    assert json.loads(result)['verdict']=='request_changes' and session
+    assert (repository/'README.md').read_bytes()==original
+    assert report.read_text()=='# Independent findings'
+    assert all('Bash' not in [t['name'] for t in body['tools']] for body in requests)

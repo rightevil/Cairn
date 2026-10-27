@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 from datetime import datetime, timedelta, timezone
 from importlib import resources
 import json
@@ -150,7 +152,8 @@ class DevelopmentDispatcher:
                     continue
                 workers = sorted([w for w in self.config.workers if value.role in w.roles and counts.get(w.name, 0) < w.max_running
                                   and (value.role != "implementer" or w.tier == value.model_tier)
-                                  and (value.purpose != "design" or w.type == "claudecode" and w.tier == "strong")],
+                                  and (value.purpose != "design" or w.type == "claudecode" and w.tier == "strong")
+                                  and (not (value.purpose == "plan" and value.subject and next((i.work.result.get("design_candidate") for i in project.intents if i.id == value.subject and i.work), None)) or w.type == "claudecode")],
                                  key=lambda w: (w.priority, counts.get(w.name, 0)))
                 if not integration and not workers:
                     self.loop._log_changed(f"development:{summary.id}:{value.role}:unavailable", logging.WARNING,
@@ -299,7 +302,6 @@ class DevelopmentDispatcher:
                 outcome = "success" if snapshot.get("checks_passed") or snapshot.get("needs_rebase") else "failed"
                 detail = snapshot.get("detail", "Integration checks " + ("passed" if outcome == "success" else "failed"))
             elif intent.work.purpose == "design":
-                import asyncio
                 from cairn.dispatcher.design_session import run_turn
                 worktree = repository.snapshot(run["id"])
                 output, session = asyncio.run(run_turn(self, project, intent, worker, run, directory, worktree, cancellation))
@@ -311,6 +313,8 @@ class DevelopmentDispatcher:
                 if intent.work.role == "implementer":
                     owned = repository.feature(intent.id, intent.work)
                     worktree = Path(owned["worktree"])
+                    from cairn.server.design_materials import materialize_materials
+                    materialize_materials(repository.repository, worktree, config.design_materials)
                     intent.work.branch, intent.work.base_commit, intent.work.worktree = owned["branch"], owned["base"], str(worktree)
                     self.call(project.project.id, f"runs/{run['id']}/workspace", {"token": run["token"],
                               "branch": owned["branch"], "base_commit": owned["base"], "worktree": str(worktree)})
@@ -331,32 +335,42 @@ class DevelopmentDispatcher:
                     artifact = write_artifact(directory, "system-prompt.md", system, kind="artifact")
                     evidence.append(artifact)
                     run_worker.env["CAIRN_SYSTEM_PROMPT_FILE"] = artifact.path
-                argv = executable_argv(run_worker, driver.build_execute(run_worker, prompt, session).argv)
-                env = {**run_worker.env, "CAIRN_CONTEXT_PATH": str(context_path), "CAIRN_CHECKPOINT_PATH": str(checkpoint),
-                       "CAIRN_SERVER": self.config.server, "CAIRN_PROJECT_ID": project.project.id,
-                       "CAIRN_RUN_ID": run["id"], "CAIRN_RUN_TOKEN": run["token"]}
-                process = self.loop.container_manager.build_exec_process(str(worktree), env, argv,
-                                      timeout_seconds=self.config.tasks.development_timeout)
-                process.stdout_path, process.stderr_path = directory / "stdout.log", directory / "stderr.log"
+                frozen_review = intent.work.purpose == "plan" and any(
+                    i.id == intent.work.subject and i.work and i.work.result.get("design_candidate") for i in project.intents)
+                if frozen_review:
+                    from cairn.dispatcher.frozen_review import run_review
+                    from types import SimpleNamespace
+                    response, session = asyncio.run(asyncio.wait_for(run_review(self, project, worker, run, directory,
+                        worktree, prompt, context_path, cancellation), self.config.tasks.development_timeout))
+                    result = SimpleNamespace(stdout=response, stderr="", returncode=0, timed_out=False, cancelled=False)
+                    evidence.extend(file_artifact(path, kind="artifact") for path in (directory / "reports").rglob("*") if path.is_file())
+                else:
+                    argv = executable_argv(run_worker, driver.build_execute(run_worker, prompt, session).argv)
+                    env = {**run_worker.env, "CAIRN_CONTEXT_PATH": str(context_path), "CAIRN_CHECKPOINT_PATH": str(checkpoint),
+                           "CAIRN_SERVER": self.config.server, "CAIRN_PROJECT_ID": project.project.id,
+                           "CAIRN_RUN_ID": run["id"], "CAIRN_RUN_TOKEN": run["token"]}
+                    process = self.loop.container_manager.build_exec_process(str(worktree), env, argv,
+                                          timeout_seconds=self.config.tasks.development_timeout)
+                    process.stdout_path, process.stderr_path = directory / "stdout.log", directory / "stderr.log"
 
-                def started(process):
-                    identity = process_identity(process.pid)
-                    atomic_json(directory / "process.json", {"pid": process.pid, "identity": identity})
-                    current = self.call(project.project.id, f"runs/{run['id']}/heartbeat", {"token": run["token"],
-                                        "pid": process.pid, "process_identity": identity, "session": session,
-                                        "streams": {"stdout": str(process.stdout_path), "stderr": str(process.stderr_path)}})
-                    if current.get("cancel") or current.get("checkpoint_requested") or cancellation.is_cancelled:
-                        cancellation.cancel("Run superseded or stopped before CLI start")
-                        raise RuntimeError("Run superseded or stopped before CLI start")
+                    def started(process):
+                        identity = process_identity(process.pid)
+                        atomic_json(directory / "process.json", {"pid": process.pid, "identity": identity})
+                        current = self.call(project.project.id, f"runs/{run['id']}/heartbeat", {"token": run["token"],
+                                            "pid": process.pid, "process_identity": identity, "session": session,
+                                            "streams": {"stdout": str(process.stdout_path), "stderr": str(process.stderr_path)}})
+                        if current.get("cancel") or current.get("checkpoint_requested") or cancellation.is_cancelled:
+                            cancellation.cancel("Run superseded or stopped before CLI start")
+                            raise RuntimeError("Run superseded or stopped before CLI start")
 
-                process.on_started = started
-                process.start()
-                cancellation.attach_process(process)
-                try:
-                    result = process.communicate(timeout=self.config.tasks.development_timeout)
-                finally:
-                    cancellation.attach_process(None)
-                evidence.extend([file_artifact(process.stdout_path), file_artifact(process.stderr_path)])
+                    process.on_started = started
+                    process.start()
+                    cancellation.attach_process(process)
+                    try:
+                        result = process.communicate(timeout=self.config.tasks.development_timeout)
+                    finally:
+                        cancellation.attach_process(None)
+                evidence.extend([file_artifact(directory / "stdout.log"), file_artifact(directory / "stderr.log")])
                 snapshot = {"requested_model": worker.model or worker.env.get({"claudecode": "ANTHROPIC_MODEL", "codex": "CODEX_MODEL", "pi": "PI_MODEL"}.get(worker.type, "")),
                     "worker_type": worker.type, "tier": worker.tier,
                     "cli": {"exit_code": result.returncode, "timed_out": result.timed_out, "cancelled": result.cancelled}}

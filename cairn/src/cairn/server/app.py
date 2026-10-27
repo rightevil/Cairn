@@ -41,7 +41,7 @@ app.include_router(workspace.router)
 @app.get("/", include_in_schema=False)
 def index(request: Request):
     html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
-    for name in ("workspace.css", "development.js", "design.js", "workspace.js"):
+    for name in ("workspace.css", "agent-output.js", "development.js", "design.js", "workspace.js"):
         version = sha256((STATIC_DIR / name).read_bytes()).hexdigest()[:16]
         html = html.replace(f'"/static/{name}"', f'"/static/{name}?v={version}"')
     response = HTMLResponse(html, headers={"Cache-Control": "no-store"})

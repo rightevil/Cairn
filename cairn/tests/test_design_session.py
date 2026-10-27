@@ -94,6 +94,8 @@ def test_sdk_turn_automatically_orchestrates_and_resumes_with_persisted_question
         if action.startswith('design?input_id='):
             return {'draft': {'session': resume, 'baseline': '', 'version': 0}, 'messages': [
                 {'id': 1, 'kind': 'user', 'data': {'content': content, 'answers': {'Q1': 'Explicit choice'}}}]}
+        if action.endswith('/inputs'):
+            return {'items': [], 'closed': True}
         events.append(payload)
         return {'version': 1}
 
@@ -110,7 +112,7 @@ def test_sdk_turn_automatically_orchestrates_and_resumes_with_persisted_question
             return {'commands': [{'name': 'bmad-prd'}]}
         async def query(self, prompt):
             captured['prompt'] = prompt
-        async def receive_response(self):
+        async def receive_messages(self):
             tools = {t.name: t for t in captured['options'].mcp_servers['cairn']['tools']}
             await tools['ask_questions'].handler({'questions': [{'id': 'Q2', 'text': 'Next decision'}]})
             guard = captured['options'].hooks['PreToolUse'][0].hooks[0]
@@ -155,3 +157,18 @@ def test_sdk_turn_automatically_orchestrates_and_resumes_with_persisted_question
     assert 'Explicit choice' in (workspace / 'context.json').read_text()
     assert 'Fix the write conflict' in (workspace / 'context.json').read_text()
     assert session == resume if resume else bool(session)
+
+
+def test_frozen_review_tools_enforce_artifact_only_writes(tmp_path):
+    from cairn.dispatcher.frozen_review import review_tool_allowed as allowed
+    snapshot, reports = tmp_path / 'snapshot', tmp_path / 'run/reports'
+    context = (tmp_path / 'run/context.json').resolve()
+    assert allowed(snapshot,reports,{context},'Read',{'file_path':str(context)})
+    assert allowed(snapshot,reports,{context},'Read',{'file_path':str(snapshot / 'app.py')})
+    assert allowed(snapshot,reports,{context},'Write',{'file_path':str(reports / 'proposed.patch')})
+    assert not allowed(snapshot,reports,{context},'Edit',{'file_path':str(snapshot / 'app.py')})
+    assert not allowed(snapshot,reports,{context},'Write',{'file_path':str(context)})
+    assert not allowed(snapshot,reports,{context},'Write',{'file_path':str(reports / '../context.json')})
+    assert not allowed(snapshot,reports,{context},'Read',{'file_path':str(tmp_path / 'design-session/artifacts/spec.md')})
+    for tool in ['Bash','Agent','Skill','mcp__cairn__save_draft']:
+        assert not allowed(snapshot,reports,{context},tool,{})

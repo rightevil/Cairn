@@ -29,6 +29,12 @@ CREATE TABLE IF NOT EXISTS design_messages (
  key TEXT NOT NULL, kind TEXT NOT NULL, data TEXT NOT NULL, created_at TEXT NOT NULL,
  UNIQUE(project_id,key)
 );
+CREATE TABLE IF NOT EXISTS design_inputs (
+ message_id INTEGER PRIMARY KEY REFERENCES design_messages(id) ON DELETE CASCADE,
+ project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+ intent_id TEXT NOT NULL, run_id TEXT,
+ state TEXT NOT NULL DEFAULT 'queued'
+);
 """
 
 
@@ -58,12 +64,21 @@ class Draft(DevelopmentModel):
     releases: list[dict] = []
     stage_reviews: list[dict] = []
     commands: list[dict] = []
+    materials: dict[str, str] = {}  # repository target -> artifacts/source
+    prepared_materials: list[dict] = []
 
 
 class Message(DevelopmentModel):
     id: str = Field(min_length=1, max_length=200)
     content: str = Field(min_length=1, max_length=100_000)
     answers: dict[str, str] = {}
+    session: str | None = None
+
+
+class InputDelivery(DevelopmentModel):
+    token: str
+    action: Literal["start", "take", "delivered", "close"]
+    message_ids: list[int] = []
 
 
 class AgentUpdate(DevelopmentModel):
@@ -133,11 +148,19 @@ def review_state(conn, project_id, draft):
     current = draft.candidate.get("subject") == subject
     revision = next(({"intent_id": rid, "state": item.state} for rid, item in reversed(work)
                      if item.purpose == "design" and item.result.get("revision_feedback", {}).get("digest") == author.result["design_candidate"]), None)
+    from cairn.server.design_documents import resolve_documents
+    current_docs = resolve_documents(conn, project_id, draft)[0]
+    old_tasks = {w["key"]: w for w in frozen.get("work", [])}
+    new_tasks = {w.key: w.model_dump() for w in draft.work}
+    changes = {"documents": [key for key in set(current_docs) | set(frozen.get("documents", {})) if current_docs.get(key) != frozen.get("documents", {}).get(key)],
+               "tasks": [key for key in set(old_tasks) | set(new_tasks) if old_tasks.get(key) != new_tasks.get(key)],
+               "decisions_added": [d for d in draft.decisions if d not in frozen.get("decisions", [])],
+               "decisions_removed": [d for d in frozen.get("decisions", []) if d not in draft.decisions]}
     return {"subject": subject, "intent_id": iid, "version": frozen.get("version"), "stage": frozen.get("stage"),
             "digest": author.result["design_candidate"], "current": current, "work_state": value.state,
             "summary": draft.candidate.get("summary", "") if current else output.get("summary", ""),
             "verdict": draft.candidate.get("review", "pending") if current else output.get("verdict"),
-            "checkpoint": value.checkpoint, "retry_at": value.retry_at, "run": run, "attempts": len(runs), "revision": revision}
+            "checkpoint": value.checkpoint, "retry_at": value.retry_at, "run": run, "attempts": len(runs), "revision": revision, "changes": changes}
 
 
 @router.get("", dependencies=[Depends(require_reader)])
@@ -153,6 +176,8 @@ def state(project_id: str, after: int = 0, input_id: int | None = None):
         from pathlib import Path
         documents, _, document_errors = resolve_documents(conn, project_id, draft)
         return {"draft": draft, "messages": history, "readiness": readiness(conn, project_id, draft),
+                "deliveries": {str(r["message_id"]): r["state"] for r in conn.execute(
+                    "SELECT message_id,state FROM design_inputs WHERE project_id=?", (project_id,))},
                 "document_views": documents, "document_errors": document_errors,
                 "review": review_state(conn, project_id, draft),
                 "artifact_directory": str(Path(store.project(conn, project_id).repository) / ".cairn" / "artifacts")}
@@ -183,6 +208,11 @@ def readiness(conn, project_id, draft):
     config = store.project(conn, project_id)
     issues = []
     issues.extend(resolve_documents(conn, project_id, draft)[2])
+    from cairn.server.design_materials import prepare_materials
+    try:
+        prepare_materials(conn, project_id, draft, write=False)
+    except (ValueError, OSError) as exc:
+        issues.append("交付材料：" + str(exc))
     if config.phase != "design":
         issues.append("项目已进入开发阶段")
     if conn.execute("SELECT status FROM projects WHERE id=?", (project_id,)).fetchone()["status"] != "active":
@@ -227,12 +257,15 @@ def send(project_id: str, body: Message):
         conn.execute("BEGIN IMMEDIATE")
         config = store.project(conn, project_id, active=True)
         encoded = body.model_dump()
-        prior = conn.execute("SELECT 1 FROM design_messages WHERE project_id=? AND key=?", (project_id, body.id)).fetchone()
+        prior = conn.execute("SELECT id,data FROM design_messages WHERE project_id=? AND key=?", (project_id, body.id)).fetchone()
         if prior:
-            return {"id": record(conn, project_id, body.id, "user", encoded)}
+            previous = json.loads(prior["data"])
+            previous.setdefault("session", None)
+            if previous != encoded:
+                raise HTTPException(409, "Message ID was already used for different content")
+            return {"id": prior["id"]}
         if config.phase != "design":
             raise HTTPException(409, "Execution changes belong in blackboard controls")
-        ensure_idle(conn, project_id)
         from cairn.server.development_workflow import all_work
         for iid, w in all_work(conn, project_id):
             if w.purpose == "design" and w.state == "waiting":
@@ -242,6 +275,8 @@ def send(project_id: str, body: Message):
             config.revision = config.requested_revision
             store.save_project(conn, project_id, config)
         draft = load(conn, project_id)
+        if body.session and body.session != draft.session:
+            raise HTTPException(409, "Design session changed; reload before sending")
         if draft.candidate:
             raise HTTPException(409, "Reopen the frozen candidate before changing its design")
         for key, answer in body.answers.items():
@@ -262,9 +297,68 @@ def send(project_id: str, body: Message):
         remaining = [q.id for q in draft.questions if q.answer is None]
         if body.answers and remaining:
             return {"id": mid, "intent_id": None, "remaining_questions": remaining}
-        intent = store.add_intent(conn, project_id, "Design conversation", WorkPackage(
+        active = next(((iid, w) for iid, w in reversed(all_work(conn, project_id)) if w.purpose == "design"
+                       and w.state in ("ready", "running", "implemented") and not w.result.get("input_closed")), None)
+        intent = active[0] if active else store.add_intent(conn, project_id, "Design conversation", WorkPackage(
             role="planner", purpose="design", revision=config.revision, result={"message_id": mid}))
-        return {"id": mid, "intent_id": intent}
+        conn.execute("INSERT INTO design_inputs(message_id,project_id,intent_id) VALUES(?,?,?)", (mid, project_id, intent))
+        # Only unsent inputs can be replayed after interruption; uncertain sends stay visible for user reconciliation.
+        if not active:
+            conn.execute("UPDATE design_inputs SET intent_id=?,run_id=NULL WHERE project_id=? AND state='queued'",
+                         (intent, project_id))
+            first = conn.execute("SELECT MIN(message_id) FROM design_inputs WHERE project_id=? AND intent_id=? AND state='queued'", (project_id, intent)).fetchone()[0]
+            value = store.work(conn, project_id, intent)
+            value.result["message_id"] = first
+            store.save_work(conn, project_id, intent, value)
+        return {"id": mid, "intent_id": intent, "delivery": "queued"}
+
+
+@router.post("/runs/{run_id}/inputs", dependencies=[Depends(require_worker)])
+def inputs(project_id: str, run_id: str, body: InputDelivery):
+    from cairn.server.routers.development import live_run
+    with get_conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        run = live_run(conn, project_id, run_id, body.token)
+        value = store.work(conn, project_id, run["intent_id"])
+        store.project(conn, project_id, active=True)
+        if value.purpose != "design" or run["cancel_requested"]:
+            raise HTTPException(409, "Design input lease is no longer active")
+        if body.action == "delivered":
+            for mid in body.message_ids:
+                conn.execute("UPDATE design_inputs SET state='delivered' WHERE project_id=? AND intent_id=? AND run_id=? AND message_id=? AND state='sending'",
+                             (project_id, run["intent_id"], run_id, mid))
+            return {"items": []}
+        initial = value.result["message_id"]
+        if body.action == "start":
+            conn.execute("UPDATE design_inputs SET state='sending',run_id=? WHERE project_id=? AND intent_id=? AND message_id=? AND state='queued'",
+                         (run_id, project_id, run["intent_id"], initial))
+            return {"items": []}
+        if value.result.get("input_closed"):
+            return {"items": [], "closed": True}
+        rows = conn.execute("SELECT d.message_id,m.data FROM design_inputs d JOIN design_messages m ON m.id=d.message_id "
+                            "WHERE d.project_id=? AND d.intent_id=? AND d.state='queued' ORDER BY d.message_id", (project_id, run["intent_id"])).fetchall()
+        if body.action == "close" and not rows:
+            value.result["input_closed"] = True
+            store.save_work(conn, project_id, run["intent_id"], value)
+            return {"items": [], "closed": True}
+        for row in rows:
+            conn.execute("UPDATE design_inputs SET state='sending',run_id=? WHERE message_id=?", (run_id, row["message_id"]))
+        return {"items": [{"id": r["message_id"], "data": json.loads(r["data"])} for r in rows], "closed": False}
+
+
+def settle_inputs(conn, project_id, intent_id, run_id, outcome):
+    value = store.work(conn, project_id, intent_id)
+    if outcome == "success" and value.result.get("message_id"):
+        conn.execute("UPDATE design_inputs SET state='delivered',run_id=? WHERE project_id=? AND message_id=? AND state IN ('queued','sending')",
+                     (run_id, project_id, value.result["message_id"]))
+    conn.execute("UPDATE design_inputs SET state='uncertain' WHERE project_id=? AND run_id=? AND state='sending'", (project_id, run_id))
+    pending = conn.execute("SELECT message_id FROM design_inputs WHERE project_id=? AND intent_id=? AND state='queued' ORDER BY message_id",
+                           (project_id, intent_id)).fetchall()
+    if pending and outcome == "success":
+        config = store.project(conn, project_id)
+        iid = store.add_intent(conn, project_id, "Continue queued design guidance", WorkPackage(
+            role="planner", purpose="design", revision=config.revision, result={"message_id": pending[0]["message_id"]}))
+        conn.execute("UPDATE design_inputs SET intent_id=?,run_id=NULL WHERE project_id=? AND intent_id=? AND state='queued'", (iid, project_id, intent_id))
 
 
 @router.post("/runs/{run_id}", dependencies=[Depends(require_worker)])
@@ -285,7 +379,18 @@ def update(project_id: str, run_id: str, body: AgentUpdate):
         if body.kind == "draft":
             if body.data.get("version") != draft.version or draft.candidate:
                 raise HTTPException(409, "Draft version changed; reload before saving")
-            fields = {k: body.data[k] for k in ("stage", "documents", "decisions", "work") if k in body.data}
+            if value.result.get("revision_feedback") and "decisions" in body.data:
+                if not isinstance(body.data["decisions"], list) or any(not isinstance(d, str) for d in body.data["decisions"]):
+                    raise HTTPException(422, "Expected a decisions array of strings")
+                removed = set(draft.decisions) - set(body.data["decisions"])
+                approvals = body.data.get("decision_changes", {})
+                if not isinstance(approvals, dict):
+                    raise HTTPException(422, "Expected confirmed decision to question ID mappings")
+                for decision in removed:
+                    question = next((q for q in draft.questions if q.id == approvals.get(decision)), None)
+                    if not question or question.answer is None or (question.answer_message_id or 0) <= value.result["message_id"]:
+                        raise HTTPException(409, "Changing a confirmed decision requires a new explicit user answer: " + decision)
+            fields = {k: body.data[k] for k in ("stage", "documents", "decisions", "work", "materials") if k in body.data}
             draft = validated(Draft, {**draft.model_dump(), **fields, "version": draft.version + 1,
                                           "control_revision": config.revision})
         elif body.kind == "questions":
@@ -305,8 +410,13 @@ def update(project_id: str, run_id: str, body: AgentUpdate):
             draft.questions.extend(incoming)
             draft.version += 1
         elif body.kind == "answers":
+            input_id = body.data.get("message_id", value.result["message_id"])
+            if input_id != value.result["message_id"] and not conn.execute(
+                "SELECT 1 FROM design_inputs WHERE project_id=? AND message_id=? AND run_id=? AND state='delivered'",
+                (project_id, input_id, run_id)).fetchone():
+                raise HTTPException(409, "Answer source must be a delivered input in this session")
             message = conn.execute("SELECT id,data FROM design_messages WHERE project_id=? AND id=? AND kind='user'",
-                                   (project_id, value.result["message_id"])).fetchone()
+                                   (project_id, input_id)).fetchone()
             user_message = json.loads(message["data"]) if message else {}
             content = user_message.get("content", "")
             answers = body.data.get("answers", [])
@@ -341,6 +451,9 @@ def update(project_id: str, run_id: str, body: AgentUpdate):
 
 def digest(draft):
     payload = draft.model_dump(exclude={"candidate", "releases", "commands", "session"})
+    for field in ("materials", "prepared_materials"):
+        if not payload[field]:
+            payload.pop(field)  # Preserve hashes of candidates frozen before material packaging existed.
     return hashlib.sha256(store.dump(payload).encode()).hexdigest()
 
 
@@ -365,6 +478,11 @@ def freeze(project_id: str, body: Version):
         draft.documents, draft.document_sources, document_errors = resolve_documents(conn, project_id, draft)
         if document_errors:
             raise HTTPException(422, "；".join(document_errors))
+        from cairn.server.design_materials import prepare_materials
+        try:
+            draft.prepared_materials = prepare_materials(conn, project_id, draft)
+        except (ValueError, OSError) as exc:
+            raise HTTPException(422, "交付材料：" + str(exc)) from exc
         outcome = DevelopmentOutcome(kind="plan", summary=f"Design stage: {draft.stage}", work=draft.work)
         author = conn.execute("SELECT r.* FROM runs r JOIN intents i ON i.project_id=r.project_id AND i.id=r.intent_id "
                               "WHERE r.project_id=? AND r.state='success' AND json_extract(i.work,'$.purpose')='design' "
@@ -543,6 +661,7 @@ def publish(project_id: str, body: Version):
         config.design = "\n\n".join(f"# {key}\n{content}" for key, content in draft.documents.items())
         config.architecture = draft.documents.get("architecture", config.architecture)
         config.design_revision += 1
+        config.design_materials = draft.prepared_materials
         config.phase = "execution"
         conn.execute("UPDATE facts SET description=? WHERE project_id=? AND id='goal'",
                      (draft.documents.get("requirements") or draft.documents.get("brief") or config.design, project_id))

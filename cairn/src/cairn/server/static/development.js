@@ -18,8 +18,13 @@ function developmentFeatures() {
       try {
         const result = await this.api('GET', `/projects/${id}/development`);
         if (this.selectedProjectId !== id) return;
+        const selected = this.selectedAgentSession();
         this.developmentState = result;
+        if (selected && !this.selectedAgentSession()) {
+          this.agentSessionKey = (result.sessions || []).find(s => s.runs.some(r => selected.runs.some(old => old.id === r.id)))?.key || '';
+        }
         if (this.selectedProjectId === id && this.loadDesign) await this.loadDesign(id);
+        if (this.selectedProjectId === id) await this.loadAgentConversation();
         if (this.selectedProjectId === id) this.developmentError = '';
       } catch (error) { if (this.selectedProjectId === id) this.developmentError = error.message; }
     },

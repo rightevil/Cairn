@@ -7,6 +7,50 @@ function designFeatures() {
     designReadiness: { ready: false, issues: ['正在检查提交条件'], version: -1 },
     designDocuments: {}, designDocumentErrors: [], designArtifactDirectory: '',
     designReview: null,
+    designPanelTab: 'review', designDeliveries: {}, agentSessionKey: '', agentRunTexts: {}, agentLoading: false, agentError: '',
+
+    projectSessions() { return this.developmentState.sessions || []; },
+    selectedAgentSession() { return this.projectSessions().find(s => s.key === this.agentSessionKey && !s.main) || null; },
+    selectAgentSession(key) {
+      const session = this.projectSessions().find(s => s.key === key);
+      this.agentSessionKey = session?.main ? '' : key;
+      this.agentError = '';
+      if (session?.main) this.setStage('design');
+      else this.loadAgentConversation();
+    },
+    selectRunSession(run) {
+      const session = this.projectSessions().find(s => s.runs.some(r => r.id === run.id));
+      if (session) this.selectAgentSession(session.key);
+    },
+    agentEntries() {
+      const session = this.selectedAgentSession();
+      if (!session) return [];
+      return session.runs.flatMap(run => agentOutput(this.agentRunTexts[run.id] || '').map(entry => ({...entry,id:run.id + ':' + entry.id})));
+    },
+    async loadAgentConversation() {
+      const session = this.selectedAgentSession() || this.projectSessions().find(s => s.main), projectId = this.selectedProjectId;
+      if (!session || this.agentLoading) return;
+      const history = this.$refs?.agentHistory;
+      const follow = history && history.scrollHeight - history.scrollTop - history.clientHeight < 100;
+      this.agentLoading = true;
+      try {
+        for (const run of session.runs) {
+          if (session.main && run.design_conversation) continue;
+          if (!run.streams?.stdout || run.state !== 'running' && this.agentRunTexts[run.id] !== undefined) continue;
+          const response = await fetch(`/projects/${projectId}/development/runs/${run.id}/stream/stdout`);
+          if (!response.ok) throw new Error('会话输出暂不可用，请稍后重试');
+          const text = await response.text();
+          if (this.selectedProjectId !== projectId || (session.main ? !!this.agentSessionKey : this.agentSessionKey !== session.key)) return;
+          this.agentRunTexts[run.id] = text;
+        }
+        this.agentError = '';
+        if (follow) this.$nextTick(() => { history.scrollTop = history.scrollHeight; });
+      } catch (e) { if (this.selectedProjectId === projectId) this.agentError = e.message; }
+      finally { this.agentLoading = false; }
+    },
+    deliveryLabel(id) {
+      return {queued:'已保存 · 待投递',sending:'正在投递，尚未确认',delivered:'已送达运行进程',uncertain:'投递结果待核对，请勿盲目重发'}[this.designDeliveries[id]] || '';
+    },
 
     designReviewStatus() {
       const review = this.designReview;
@@ -55,7 +99,14 @@ function designFeatures() {
     },
 
     visibleDesignEntries() {
-      return this.designEntries.filter(entry => String(entry.text || '').replace(/[\s\u200B-\u200D\uFEFF]/g, '').length);
+      const extra = (this.projectSessions().find(s => s.main)?.runs || []).filter(r => !r.design_conversation)
+        .flatMap(run => agentOutput(this.agentRunTexts[run.id] || '').map(entry => ({...entry,id:run.id + ':' + entry.id,role:entry.role === 'Agent' ? 'Claude' : '工作流'})));
+      return [...this.designEntries, ...extra].filter(entry => String(entry.text || '').replace(/[\s\u200B-\u200D\uFEFF]/g, '').length);
+    },
+
+    designActivityLabel() {
+      const active = (this.project?.intents || []).find(i => i.work?.purpose === 'design' && ['ready','running','implemented'].includes(i.work.state));
+      return {ready:'设计任务已排队，等待执行器领取…',running:'设计 Agent 正在工作…',implemented:'输出已返回，正在校验…'}[active?.work.state] || '';
     },
 
     nextDesignStage() {
@@ -100,6 +151,7 @@ function designFeatures() {
         this.designDocuments = {}; this.designDocumentErrors = [];
         this.designArtifactDirectory = '';
         this.designReview = null;
+        this.designDeliveries = {}; this.agentSessionKey = ''; this.agentRunTexts = {}; this.designPanelTab = 'review';
       }
       try {
         const state = await this.api('GET', `/projects/${id}/development/design?after=${this.designCursor}`);
@@ -109,6 +161,7 @@ function designFeatures() {
         this.designDocumentErrors = state.document_errors || [];
         this.designArtifactDirectory = state.artifact_directory || '';
         this.designReview = state.review || null;
+        this.designDeliveries = state.deliveries || {};
         this.designReadiness = state.readiness || { ready: false, issues: ['请重启 Cairn 以加载提交校验'], version: -1 };
         for (const item of state.messages) this.designReceive(item);
         this.designError = '';
@@ -170,7 +223,7 @@ function designFeatures() {
     async sendDesign(question = null) {
       const answer = question ? (this.designAnswers[question.id] || '').trim() : '';
       const text = question ? answer : this.designInput.trim();
-      if (!text || this.designSending || this.designBusy()) return;
+      if (!text || this.designSending || this.selectedAgentSession() || !this.canDesign()) return;
       this.designSending = true;
       const projectId = this.selectedProjectId;
       const signature = JSON.stringify([text, question?.id || '']);
@@ -178,7 +231,8 @@ function designFeatures() {
       this.designMessageId ||= crypto.randomUUID();
       try {
         await this.api('POST', `/projects/${projectId}/development/design/messages`, {
-          id: this.designMessageId, content: question ? `${question.id}：${answer}` : text, answers: question ? { [question.id]: answer } : {}
+          id: this.designMessageId, session: this.designDraft.session || null,
+          content: question ? `${question.id}：${answer}` : text, answers: question ? { [question.id]: answer } : {}
         });
         if (this.selectedProjectId !== projectId) return;
         this.designMessageId = '';
@@ -202,6 +256,7 @@ function designFeatures() {
         await this.loadProject(this.selectedProjectId);
         if (action === 'publish') { this.setStage('development'); this.showToast('已确认此版本，原生任务已交给 Cairn 执行'); }
         if (action === 'reopen') this.showToast('修订已排队，设计 Agent 将接收评审意见并保存新草案');
+        this.designPanelTab = 'review';
       } catch (e) { if (this.selectedProjectId === projectId) this.designError = e.message; }
       finally { this.designSending = false; }
     },

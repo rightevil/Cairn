@@ -4,14 +4,12 @@ from __future__ import annotations
 import asyncio
 from dataclasses import asdict, is_dataclass
 import json
-import os
 from pathlib import Path
 import uuid
 
 from cairn.dispatcher.design_skills import BMAD_SKILLS, prepare, run_script
 from cairn.dispatcher.runtime.git_workspace import git
 from cairn.dispatcher.runtime.design_artifacts import export_artifacts
-from cairn.dispatcher.runtime.process_identity import process_identity
 from cairn.server.development_models import PlannedWork
 
 
@@ -31,9 +29,7 @@ def tool_path_allowed(workspace: Path, snapshot: Path, tool: str, inputs: dict):
 
 async def run_turn(dispatcher, project, intent, worker, run, directory, snapshot, cancellation):
     from claude_agent_sdk import (ClaudeSDKClient, ClaudeAgentOptions, HookMatcher, ResultMessage,
-                                  SystemMessage, StreamEvent, AssistantMessage, TextBlock, tool, create_sdk_mcp_server)
-    # shortcut: SDK process ownership uses its subprocess transport; review on SDK upgrades.
-    from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
+                                  SystemMessage, StreamEvent, AssistantMessage, UserMessage, TextBlock, tool, create_sdk_mcp_server)
     from cairn.dispatcher.development import executable_argv
 
     pid = project.project.id
@@ -63,6 +59,8 @@ async def run_turn(dispatcher, project, intent, worker, run, directory, snapshot
     @tool("save_draft", "Persist the native design draft using the latest version. No publication or approval.",
           {"type": "object", "properties": {"version": {"type": "integer"}, "stage": {"enum": ["brief", "requirements", "ux", "architecture", "plan"]},
            "documents": {"type": "object", "additionalProperties": {"type": "string"}}, "decisions": {"type": "array", "items": {"type": "string"}},
+           "materials": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Repository relative destination to artifacts/source mapping; Cairn prepares it before review."},
+           "decision_changes": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Removed confirmed decision -> newly answered question ID. Required when a revision changes confirmed decisions."},
            "work": {"type": "array", "items": PlannedWork.model_json_schema()}}, "required": ["version", "stage", "documents", "decisions", "work"], "additionalProperties": False})
     async def save_draft(args):
         try:
@@ -84,7 +82,7 @@ async def run_turn(dispatcher, project, intent, worker, run, directory, snapshot
             return result(str(exc), True)
 
     @tool("resolve_questions", "Associate clear answers with exact quotes from the current user message. Cannot approve a design.",
-          {"type": "object", "properties": {"answers": {"type": "array", "items": {"type": "object", "properties": {
+          {"type": "object", "properties": {"message_id": {"type": "integer", "description": "Persisted input ID when quoting a later guidance message"}, "answers": {"type": "array", "items": {"type": "object", "properties": {
               "id": {"type": "string"}, "quote": {"type": "string"}}, "required": ["id", "quote"], "additionalProperties": False}}},
            "required": ["answers"], "additionalProperties": False})
     async def resolve_questions(args):
@@ -122,35 +120,9 @@ async def run_turn(dispatcher, project, intent, worker, run, directory, snapshot
         allowed_tools=["Read", "Glob", "Grep", "Write", "Edit", "Skill", "WebSearch", "WebFetch",
                        "mcp__cairn__save_draft", "mcp__cairn__ask_questions", "mcp__cairn__resolve_questions", "mcp__cairn__bmad_script"],
         resume=draft["session"], session_id=None if draft["session"] else session,
-        include_partial_messages=True, hooks={"PreToolUse": [HookMatcher(hooks=[guard])]},
+        include_partial_messages=True, extra_args={"replay-user-messages": None}, hooks={"PreToolUse": [HookMatcher(hooks=[guard])]},
         mcp_servers={"cairn": create_sdk_mcp_server("cairn", tools=[save_draft, ask_questions, resolve_questions, bmad_script])},
         stderr=lambda line: append_log(directory / "stderr.log", line))
-
-    class OwnedTransport(SubprocessCLITransport):
-        job = None
-
-        async def connect(self):
-            try:
-                await super().connect()
-                process = self._process
-                if os.name == "nt":
-                    from cairn.dispatcher.runtime.windows_job import WindowsJob
-                    self.job = WindowsJob()
-                    self.job.assign_and_resume(process.pid)
-                dispatcher.call(pid, f"runs/{run['id']}/heartbeat", {"token": run["token"], "pid": process.pid,
-                    "process_identity": process_identity(process.pid), "session": session,
-                    "streams": {"stdout": str(directory / "stdout.log"), "stderr": str(directory / "stderr.log")}})
-            except BaseException:
-                await self.close()
-                raise
-
-        async def close(self):
-            try:
-                await super().close()
-            finally:
-                if self.job:
-                    self.job.close()
-                    self.job = None
 
     context = {"draft": draft, "snapshot": str(snapshot), "workspace": str(workspace),
                "revision_feedback": intent.work.result.get("revision_feedback"),
@@ -167,12 +139,43 @@ async def run_turn(dispatcher, project, intent, worker, run, directory, snapshot
     prompt += "\nRead context.json for persisted answers, decisions and the current draft. Save meaningful changes via Cairn tools."
     append_log(directory / "stdout.log", "Starting resumable Claude Code design session " + session)
     finished = None
-    transport = OwnedTransport(prompt=None, options=options)
+    from cairn.dispatcher.runtime.sdk_transport import owned_transport
+    transport = owned_transport(dispatcher, pid, run, directory, options, session)
     async with ClaudeSDKClient(options=options, transport=transport) as client:
         await asyncio.to_thread(emit, "session", {"session": session, "baseline": baseline})
         info = await client.get_server_info() or {}
         await asyncio.to_thread(emit, "commands", {"commands": info.get("commands", [])})
+        async def delivery(action, ids=None):
+            return await asyncio.to_thread(dispatcher.call, pid, f"design/runs/{run['id']}/inputs", {
+                "token": run["token"], "action": action, "message_ids": ids or []})
+
+        await delivery("start")
         await client.query(prompt)
+        await delivery("delivered", [intent.work.result["message_id"]])
+        awaiting_ack = set()
+        input_lock = asyncio.Lock()
+        async def forward(close=False):
+            async with input_lock:
+                batch = await delivery("close" if close else "take")
+                for item in batch.get("items", []):
+                    message_uuid = str(uuid.uuid5(uuid.NAMESPACE_URL, pid + ":" + str(item["id"])))
+                    awaiting_ack.add(message_uuid)
+                    async def incoming(item=item, message_uuid=message_uuid):
+                        yield {"type": "user", "uuid": message_uuid, "message": {"role": "user", "content":
+                            f"Cairn persisted user input #{item['id']} (direction guidance, not publication or review approval):\n" + item["data"]["content"]}, "parent_tool_use_id": None, "client_composed": True}
+                    await client.query(incoming())
+                    await delivery("delivered", [item["id"]])
+                return batch.get("closed", False)
+
+        async def forward_inputs():
+            try:
+                while True:
+                    await asyncio.sleep(.2)
+                    await forward()
+            except Exception:
+                owner.cancel()
+                raise
+        sender = asyncio.create_task(forward_inputs())
 
         owner = asyncio.current_task()
         async def watch():
@@ -189,7 +192,7 @@ async def run_turn(dispatcher, project, intent, worker, run, directory, snapshot
         active_text_block = None
         text_message = 0
         try:
-            async for message in client.receive_response():
+            async for message in client.receive_messages():
                 append_log(directory / "stdout.log", json.dumps(asdict(message) if is_dataclass(message) else str(message), ensure_ascii=False, default=str))
                 if isinstance(message, SystemMessage) and message.subtype == "init":
                     commands = message.data.get("slash_commands", [])
@@ -222,11 +225,27 @@ async def run_turn(dispatcher, project, intent, worker, run, directory, snapshot
                             await asyncio.to_thread(emit, "text", {"block": key, "text": block.text, "mode": "snapshot"})
                         else:
                             await asyncio.to_thread(emit, "text", {"block": run["id"] + ":" + str(sequence), "text": block.text})
+                elif isinstance(message, UserMessage):
+                    awaiting_ack.discard(message.uuid)
                 elif isinstance(message, ResultMessage):
                     finished = message
+                    if message.is_error:
+                        break
+                    # Inputs may join one active turn: acknowledge UUIDs, never count queries as results.
+                    if not awaiting_ack and await forward(close=True) and not awaiting_ack:
+                        break
+                if sender.done():
+                    sender.result()
+        except asyncio.CancelledError:
+            if sender.done() and not sender.cancelled() and sender.exception():
+                raise RuntimeError("Design guidance delivery failed; inspect persisted delivery states") from sender.exception()
+            if cancellation.is_cancelled:
+                raise RuntimeError("Design session interrupted; inputs retained")
+            raise
         finally:
+            sender.cancel()
             watcher.cancel()
-            await asyncio.gather(watcher, return_exceptions=True)
+            await asyncio.gather(sender, watcher, return_exceptions=True)
             await asyncio.to_thread(export_artifacts, workspace / "artifacts", repository)
     if finished is None or finished.is_error:
         raise RuntimeError("Claude design turn failed: " + (getattr(finished, "result", None) or "missing result"))

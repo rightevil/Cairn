@@ -5,6 +5,7 @@ const vm = require('node:vm');
 
 const root = path.join(__dirname, '../src/cairn/server/static');
 const context = vm.createContext({ URLSearchParams, setTimeout, clearTimeout, crypto: { randomUUID: () => 'message-id' } });
+vm.runInContext(fs.readFileSync(path.join(root, 'agent-output.js'), 'utf8'), context);
 vm.runInContext(fs.readFileSync(path.join(root, 'development.js'), 'utf8'), context);
 vm.runInContext(fs.readFileSync(path.join(root, 'design.js'), 'utf8'), context);
 const html = fs.readFileSync(path.join(root, 'index.html'), 'utf8');
@@ -63,6 +64,9 @@ app.designReview.revision.state = 'running';
 assert(app.designReviewStatus().includes('正在根据评审意见修订'));
 assert(html.includes('根据上一轮评审恢复修订') && html.includes('交给设计 Agent 继续修改'));
 assert(html.includes('查看评审实时输出') && html.includes('查看完整评审报告'));
+assert(!html.includes('打开 Agent 窗口'));
+assert(html.includes('session-tree') && html.includes('design-panel-tabs'));
+assert(!html.includes('designSending || designBusy() || !designInput.trim()'));
 assert(html.includes('pendingQuestions().slice(0, 1)') && html.includes('保存并继续') && html.includes('提交本轮回答'));
 app.designDraft.commands = [{ name: 'bmad-prd' }, { name: 'bmad-architecture' }, { name: 'theme' }];
 app.designInput = '/b';
@@ -196,6 +200,7 @@ console.log('Development UI checks passed: revision phase, live workers, stop/st
   assert.equal(controlCalls.length, 1, 'A late response must not reload another project');
   const chat = context.cairnApp();
   chat.selectedProjectId = 'first'; chat.designInput = 'Discuss the first project';
+  chat.project = {project:{status:'active',development:{phase:'design'}},intents:[]};
   let releaseMessage;
   chat.api = () => new Promise(resolve => { releaseMessage = resolve; });
   const pendingMessage = chat.sendDesign();
@@ -214,3 +219,25 @@ assert.equal(tierApp.developmentRole('implementer',{intent_id:'strong-task'}),'�
 assert.equal(tierApp.developmentRole('reviewer'),'独立审查');
 tierApp.designDraft.work = [{key:'a',dependencies:[]},{key:'b',dependencies:['a']},{key:'c',dependencies:['a']}];
 assert.equal(tierApp.planParallelWidth(),2);
+
+const liveChat = context.cairnApp();
+liveChat.project = {project:{status:'active',development:{phase:'design'}},intents:[{work:{purpose:'design',state:'running'}}]};
+liveChat.developmentState.sessions=[{key:'main',main:true,runs:[]},{key:'session:review',main:false,title:'独立评审',runs:[{id:'review-run'}]}];
+liveChat.designInput='More guidance'; liveChat.selectedProjectId='project';
+liveChat.loadProject=async()=>{};
+let sentGuidance=0;
+liveChat.api=async()=>{sentGuidance++;return {delivery:'queued'};};
+liveChat.sendDesign().then(()=>assert.equal(sentGuidance,1,'Working agents must accept ordinary guidance'));
+liveChat.agentSessionKey='session:review';
+assert.equal(liveChat.selectedAgentSession().title,'独立评审');
+liveChat.designInput='Must not go to main';
+liveChat.sendDesign().then(()=>assert.equal(sentGuidance,1,'Read-only review must not redirect input to main'));
+const transcript=context.agentOutput([
+ JSON.stringify({subtype:'thinking_tokens',data:{estimated_tokens:20}}),
+ JSON.stringify({event:{type:'message_start'}}),
+ JSON.stringify({event:{type:'content_block_delta',delta:{type:'text_delta',text:'## Finding'}}}),
+ JSON.stringify({content:[{text:'## Finding'}]}),
+ JSON.stringify({subtype:'success',result:'## Finding'})
+].join('\n'));
+assert.equal(transcript.length,1);
+assert.equal(transcript[0].text,'## Finding');

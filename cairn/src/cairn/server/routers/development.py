@@ -84,6 +84,8 @@ def recover(project_id: str, run_id: str, body: RecoveryRequest):
             raise HTTPException(409, "Recovery requires an expired local run and confirmed process termination")
         conn.execute("UPDATE runs SET state='recovered',finished_at=?,detail=? WHERE id=?",
                      (utcnow(), body.detail, run_id))
+        from cairn.server.design import settle_inputs
+        settle_inputs(conn, project_id, row["intent_id"], run_id, "recovered")
         store.event(conn, project_id, "run_recovered", run_id, body.detail)
         return {"state": "recovered"}
 
@@ -141,7 +143,7 @@ def intent_runs(project_id: str, intent_id: str):
 def evidence(project_id: str, run_id: str, index: int):
     from fastapi.responses import PlainTextResponse
     with get_conn() as conn:
-        row = conn.execute("SELECT evidence FROM runs WHERE project_id=? AND id=?", (project_id, run_id)).fetchone()
+        row = conn.execute("SELECT evidence,streams FROM runs WHERE project_id=? AND id=?", (project_id, run_id)).fetchone()
         if row is None:
             raise HTTPException(404, "Run not found")
         items = json.loads(row["evidence"])
@@ -149,7 +151,10 @@ def evidence(project_id: str, run_id: str, index: int):
             raise HTTPException(404, "Evidence not found")
         item = items[index]
         path = Path(item["path"]).resolve()
-        if path.parent.name != run_id or not path.is_file():
+        stdout = json.loads(row["streams"]).get("stdout")
+        owned = Path(stdout).resolve().parent if stdout else None
+        in_reports = owned is not None and owned.name == run_id and path.is_relative_to(owned / "reports")
+        if (path.parent.name != run_id and not in_reports) or not path.is_file():
             raise HTTPException(409, "Evidence is not in its owned run directory")
         with path.open("rb") as source:
             if hashlib.file_digest(source, "sha256").hexdigest() != item["sha256"]:
@@ -186,11 +191,13 @@ def stream(project_id: str, run_id: str, channel: str):
 @router.get("", dependencies=[Depends(require_reader)])
 def state(project_id: str):
     from cairn.server.work_resources import scheduling
+    from cairn.server.agent_sessions import sessions
     with get_conn() as conn:
         config = store.project(conn, project_id)
         return {
             "project": config,
             "scheduling": scheduling(conn, project_id),
+            "sessions": sessions(conn, project_id),
             "runs": [public_run(r) for r in conn.execute(
                 "SELECT * FROM runs WHERE project_id=? AND (state='running' OR id IN "
                 "(SELECT id FROM runs WHERE project_id=? ORDER BY rowid DESC LIMIT 100)) ORDER BY rowid DESC", (project_id, project_id))],
@@ -240,6 +247,11 @@ def claim(project_id: str, intent_id: str, body: RunClaim):
             raise HTTPException(409, "Design phase permits conversation and frozen-candidate review only")
         if value.role != body.role or value.revision != body.revision:
             raise HTTPException(409, "Role or control revision changed")
+        if value.purpose == "design":
+            if conn.execute("SELECT 1 FROM runs r JOIN intents i ON i.id=r.intent_id AND i.project_id=r.project_id "
+                            "WHERE r.project_id=? AND json_extract(i.work,'$.purpose')='design' AND "
+                            "(r.state='running' OR (r.state='success' AND r.applied=0))", (project_id,)).fetchone():
+                raise HTTPException(409, "The existing design session is still active or awaiting application")
         if store.stale_review(conn, project_id, value):
             value.state = "superseded"
             store.save_work(conn, project_id, intent_id, value)
@@ -345,6 +357,9 @@ def finish(project_id: str, run_id: str, body: RunFinish):
             value.state = "implemented"
         value.checkpoint = body.checkpoint or body.detail
         store.save_work(conn, project_id, row["intent_id"], value)
+        if value.purpose == "design":
+            from cairn.server.design import settle_inputs
+            settle_inputs(conn, project_id, row["intent_id"], run_id, outcome)
         conn.execute("UPDATE intents SET worker=NULL WHERE project_id=? AND id=?", (project_id, row["intent_id"]))
         store.event(conn, project_id, "run_finished", run_id, outcome)
         result = public_run(conn.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone())
