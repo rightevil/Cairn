@@ -23,60 +23,6 @@ from cairn.server.services import get_project_or_404, next_hint_id, utcnow
 router = APIRouter(prefix="/projects/{project_id}/development", tags=["development"])
 
 
-@router.post("/materials", dependencies=[Depends(require_operator)])
-def recover_materials(project_id: str, body: dict):
-    from cairn.server.design_materials import legacy_materials, confined
-    with get_conn() as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        config = store.project(conn, project_id)
-        preview = legacy_materials(conn, project_id)
-        if not preview.get("digest") or body.get("digest") != preview["digest"]:
-            raise HTTPException(409, "材料来源已改变或不可用，请刷新后重新核对")
-        if conn.execute("SELECT 1 FROM runs WHERE project_id=? AND state='running'", (project_id,)).fetchone():
-            raise HTTPException(409, "请先暂停并等待当前 Agent 停止，再补齐旧计划材料")
-        from cairn.server.design_documents import artifact_roots
-        from cairn.dispatcher.runtime.git_workspace import git
-        repository = Path(config.repository).resolve()
-        # Keep metadata local, as for the existing project artifact export.
-        exclude = Path(git(repository, "rev-parse", "--path-format=absolute", "--git-path", "info/exclude"))
-        existing = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
-        if "/.cairn/" not in existing.splitlines():
-            exclude.parent.mkdir(parents=True, exist_ok=True)
-            exclude.write_text(existing.rstrip() + "\n/.cairn/\n", encoding="utf-8")
-        pending = []
-        for entry in preview["entries"]:
-            source = next((p for root in artifact_roots(conn, project_id)
-                           if (p := confined(root, entry["source"].removeprefix("artifacts/"))).is_file()), None)
-            if source is None:
-                raise HTTPException(409, "源材料已不存在，请刷新")
-            content = source.read_bytes()
-            if hashlib.sha256(content).hexdigest() != entry["sha256"]:
-                raise HTTPException(409, "源材料已改变，请刷新后重新确认")
-            target = confined(repository / ".cairn", entry["archive"])
-            if target.exists() and target.read_bytes() != content:
-                raise HTTPException(409, "材料归档已有不同内容，已保留原文件")
-            pending.append((target, content))
-        for target, content in pending:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            if not target.exists():
-                with target.open("xb") as stream:
-                    stream.write(content)
-        config.design_materials = preview["entries"]
-        store.save_project(conn, project_id, config)
-        for row in conn.execute("SELECT id,work FROM intents WHERE project_id=? AND work IS NOT NULL", (project_id,)):
-            value = WorkPackage.model_validate_json(row["work"])
-            output = value.result.get("output", {})
-            summary = str(output.get("summary", ""))
-            if (value.role == "implementer" and value.state == "waiting" and output.get("kind") == "wait"
-                    and output.get("wait_for") == "user" and not value.result.get("wait_on")
-                    and any(Path(e["target"]).name in summary for e in preview["entries"])):
-                value.state, value.retry_at = "ready", None
-                store.save_work(conn, project_id, row["id"], value)
-                store.event(conn, project_id, "material_wait_resolved", row["id"], "Operator confirmed source manifest " + preview["digest"])
-        store.event(conn, project_id, "legacy_materials_confirmed", preview["digest"], store.dump(preview["entries"]))
-        return {"materials": config.design_materials}
-
-
 @router.put("/delivery", dependencies=[Depends(require_operator)])
 def delivery(project_id: str, body: DeliverySettings):
     with get_conn() as conn:
@@ -246,14 +192,12 @@ def stream(project_id: str, run_id: str, channel: str):
 def state(project_id: str):
     from cairn.server.work_resources import scheduling
     from cairn.server.agent_sessions import sessions
-    from cairn.server.design_materials import legacy_materials
     with get_conn() as conn:
         config = store.project(conn, project_id)
         return {
             "project": config,
             "scheduling": scheduling(conn, project_id),
             "sessions": sessions(conn, project_id),
-            "material_recovery": legacy_materials(conn, project_id),
             "runs": [public_run(r) for r in conn.execute(
                 "SELECT * FROM runs WHERE project_id=? AND (state='running' OR id IN "
                 "(SELECT id FROM runs WHERE project_id=? ORDER BY rowid DESC LIMIT 100)) ORDER BY rowid DESC", (project_id, project_id))],

@@ -36,7 +36,7 @@ def test_workspace_asset_urls_change_with_content_to_avoid_stale_scripts(client,
     module = import_module("cairn.server.app")
     assets = tmp_path / "static"
     assets.mkdir()
-    names = ("tokens.css", "base.css", "workspace.css", "agent-output.js", "development.js", "design.js", "workspace.js")
+    names = ("workspace.css", "agent-output.js", "development.js", "design.js", "workspace.js")
     for name in (*names, "index.html"):
         (assets / name).write_bytes((module.STATIC_DIR / name).read_bytes())
     monkeypatch.setattr(module, "STATIC_DIR", assets)

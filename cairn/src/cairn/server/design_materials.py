@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from pathlib import Path, PureWindowsPath
 import re
 
@@ -89,34 +88,3 @@ def materialize_materials(repository, workspace, materials):
             target.parent.mkdir(parents=True, exist_ok=True)
             with target.open("xb") as stream:
                 stream.write(content)
-
-
-def legacy_materials(conn, project_id):
-    """Preview current bytes against a released plan, without rewriting its historical review."""
-    from cairn.server.design import Draft, load, digest
-    config = store.project(conn, project_id)
-    if config.phase != "execution" or config.design_materials:
-        return {"needed": False}
-    draft = load(conn, project_id)
-    if not draft.releases:
-        return {"needed": False}
-    release = draft.releases[-1]
-    for row in conn.execute("SELECT work FROM intents WHERE project_id=? AND work IS NOT NULL", (project_id,)):
-        result = json.loads(row["work"]).get("result", {})
-        if result.get("design_candidate") != release["digest"]:
-            continue
-        try:
-            frozen = Draft.model_validate(result.get("design_snapshot"))
-        except ValueError:
-            return {"needed": True, "error": "原发布快照不可读取，无法可靠补齐材料"}
-        if digest(frozen) != release["digest"]:
-            return {"needed": True, "error": "原发布快照哈希不匹配，请保留现场并重新核对方案"}
-        try:
-            entries = prepare_materials(conn, project_id, frozen, write=False)
-        except (OSError, ValueError) as exc:
-            return {"needed": True, "error": str(exc)}
-        if not entries:
-            return {"needed": False}
-        receipt = {"release": release["digest"], "entries": entries}
-        return {"needed": True, "entries": entries, "digest": hashlib.sha256(store.dump(receipt).encode()).hexdigest()}
-    return {"needed": True, "error": "找不到原发布快照，无法可靠补齐材料"}
