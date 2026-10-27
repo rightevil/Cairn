@@ -158,6 +158,34 @@ def test_native_release_requires_review_and_exact_confirmation_then_is_atomic_id
     assert claim(http, project, tasks[0]['id'], role='implementer').status_code == 200
 
 
+def test_document_stage_can_be_reviewed_without_tasks_then_continue_without_publishing(http, repository):
+    project = create_design(http, repository)
+    run = claim(http, project, send(http, project)).json()
+    baseline = git(repository, 'rev-parse', 'HEAD')
+    assert agent(http, project, run, 'session', {'session': 'author', 'baseline': baseline}).status_code == 200
+    assert agent(http, project, run, 'draft', {'version': 0, 'stage': 'requirements',
+        'documents': {'prd': 'The whole PRD', 'addendum': 'All numeric rules'}, 'work': []}).status_code == 200
+    finish(http, project, run, {'kind': 'design', 'summary': 'Requirements ready'})
+    assert http.get(url(project), headers=OPERATOR).json()['readiness']['ready']
+    draft = freeze(http, project)
+    assert draft['candidate']['kind'] == 'stage'
+    payload = {'version': draft['version'], 'digest': draft['candidate']['digest']}
+    assert http.post(url(project, '/continue'), headers=OPERATOR, json=payload).status_code == 409
+    review(http, project, draft)
+    assert http.post(url(project, '/publish'), headers=OPERATOR, json=payload).status_code == 409
+    response = http.post(url(project, '/continue'), headers=OPERATOR, json=payload)
+    assert response.status_code == 200, response.text
+    continued = response.json()
+    assert continued['stage'] == 'ux' and not continued['candidate']
+    assert continued['session'] == 'author' and continued['documents'] == draft['documents']
+    assert continued['stage_reviews'][0]['review'] == 'approve'
+    project_state = http.get(f'/projects/{project}').json()
+    assert project_state['project']['development']['phase'] == 'design'
+    assert not any(i['work']['role'] == 'implementer' for i in project_state['intents'])
+    assert sum(i['work']['purpose'] == 'design' and i['work']['state'] == 'ready' for i in project_state['intents']) == 1
+    assert http.post(url(project, '/continue'), headers=OPERATOR, json=payload).status_code == 409
+
+
 @pytest.mark.parametrize('mutation', ['baseline', 'dirty', 'controls'])
 def test_publish_rejects_stale_code_or_controls(http, repository, mutation):
     project, _, _, _ = ready(http, repository)

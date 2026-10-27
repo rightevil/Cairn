@@ -22,6 +22,11 @@ function designFeatures() {
       return this.designEntries.filter(entry => String(entry.text || '').replace(/[\s\u200B-\u200D\uFEFF]/g, '').length);
     },
 
+    nextDesignStage() {
+      const stages = ['brief', 'requirements', 'ux', 'architecture', 'plan'];
+      return stages[stages.indexOf(this.designDraft.stage) + 1] || 'plan';
+    },
+
     designBusy() {
       return (this.project?.intents || []).some(i => i.work?.purpose === 'design' && ['ready', 'running', 'implemented'].includes(i.work.state));
     },

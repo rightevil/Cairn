@@ -55,5 +55,12 @@ will be created by implementation must have a runnable baseline readiness check;
 never report a future test as already run. Strong model tier is available for complex
 implementation; standard is the default. Use the returned draft version on every save.
 
+At a stage boundary, save the stage's complete documents and ask the user to use
+"冻结当前阶段并送独立评审" in the scheme panel. A stage review does not need a final
+task plan. After approval, "确认阶段评审并继续" advances design without starting
+development. Do not silently advance a completed stage before this operator action.
+At plan, the button freezes the final plan; only its separate publish confirmation
+starts development. Never ask for an invisible freeze command or treat chat consent
+as a successful review dispatch.
 When ready, tell the user to freeze the candidate for independent review. Never
 invoke publication, fabricate confirmation, or restart overall planning after handoff.

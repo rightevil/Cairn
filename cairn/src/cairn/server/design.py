@@ -56,6 +56,7 @@ class Draft(DevelopmentModel):
     session: str | None = None
     candidate: dict = {}
     releases: list[dict] = []
+    stage_reviews: list[dict] = []
     commands: list[dict] = []
 
 
@@ -167,11 +168,12 @@ def readiness(conn, project_id, draft):
         issues.append("请先回答所有待决问题")
     if config.revision != config.requested_revision or draft.control_revision != config.revision:
         issues.append("黑板指令已变化，请先让设计 Agent 核对草案")
-    try:
-        validate_plan(conn, project_id, DevelopmentOutcome(kind="plan", summary="Design readiness", work=draft.work))
-    except ValueError as exc:
-        issues.append(str(exc))
-    for task in draft.work:
+    if draft.stage == "plan":
+        try:
+            validate_plan(conn, project_id, DevelopmentOutcome(kind="plan", summary="Design readiness", work=draft.work))
+        except ValueError as exc:
+            issues.append(str(exc))
+    for task in draft.work if draft.stage == "plan" else []:
         if not task.spec_refs:
             issues.append(f"任务 {task.key} 未引用设计文档")
         for ref in task.spec_refs:
@@ -311,7 +313,7 @@ def digest(draft):
 
 @router.post("/candidate", dependencies=[Depends(require_operator)])
 def freeze(project_id: str, body: Version):
-    from cairn.server.development_workflow import add_review, validate_plan
+    from cairn.server.development_workflow import add_review
     with get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
         config = store.project(conn, project_id, active=True)
@@ -323,14 +325,14 @@ def freeze(project_id: str, body: Version):
         checks = readiness(conn, project_id, draft)
         if not checks["ready"]:
             raise HTTPException(422, "；".join(checks["issues"]))
-        for task in draft.work:
+        for task in draft.work if draft.stage == "plan" else []:
             task.spec_refs = [document_id(draft.documents, ref) + ("#" + ref.partition("#")[2] if "#" in ref else "")
                               for ref in task.spec_refs]
         from cairn.server.design_documents import resolve_documents
         draft.documents, draft.document_sources, document_errors = resolve_documents(conn, project_id, draft)
         if document_errors:
             raise HTTPException(422, "；".join(document_errors))
-        outcome = DevelopmentOutcome(kind="plan", summary="User-facing design candidate", work=draft.work)
+        outcome = DevelopmentOutcome(kind="plan", summary=f"Design stage: {draft.stage}", work=draft.work)
         author = conn.execute("SELECT r.* FROM runs r JOIN intents i ON i.project_id=r.project_id AND i.id=r.intent_id "
                               "WHERE r.project_id=? AND r.state='success' AND json_extract(i.work,'$.purpose')='design' "
                               "ORDER BY r.rowid DESC LIMIT 1", (project_id,)).fetchone()
@@ -344,7 +346,8 @@ def freeze(project_id: str, body: Version):
         store.save_work(conn, project_id, author["intent_id"], subject)
         add_review(conn, project_id, author["intent_id"], "plan", config.revision,
                    "Independently review the frozen design, native task dependencies, acceptance and baseline; do not install tasks")
-        draft.candidate = {"digest": candidate_hash, "subject": author["intent_id"], "review": "pending"}
+        draft.candidate = {"digest": candidate_hash, "subject": author["intent_id"], "review": "pending",
+                           "stage": draft.stage, "kind": "final" if draft.stage == "plan" else "stage"}
         save(conn, project_id, draft)
         return draft
 
@@ -362,6 +365,35 @@ def apply_review(conn, project_id, run, value, subject, outcome):
     value.state = "verified"
     subject.state = "reviewing"  # Human approval remains required even after a positive review.
     store.save_work(conn, project_id, value.subject, subject)
+
+
+@router.post("/continue", dependencies=[Depends(require_operator)])
+def continue_stage(project_id: str, body: Version):
+    with get_conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        config = store.project(conn, project_id, active=True)
+        draft = load(conn, project_id)
+        candidate = draft.candidate
+        if config.phase != "design" or body.version != draft.version or body.digest != digest(draft):
+            raise HTTPException(409, "Confirm the exact frozen design version")
+        if candidate.get("digest") != body.digest or candidate.get("review") != "approve" or candidate.get("kind") != "stage":
+            raise HTTPException(409, "This stage must pass independent review before continuing")
+        if config.revision != draft.control_revision or config.requested_revision != config.revision:
+            raise HTTPException(409, "Controls changed after design review")
+        ensure_idle(conn, project_id)
+        stages = ["brief", "requirements", "ux", "architecture", "plan"]
+        next_stage = stages[stages.index(draft.stage) + 1]
+        subject = store.work(conn, project_id, candidate["subject"])
+        subject.state = "verified"
+        store.save_work(conn, project_id, candidate["subject"], subject)
+        draft.stage_reviews.append({**candidate, "version": draft.version, "confirmed_at": utcnow()})
+        draft.stage, draft.candidate = next_stage, {}
+        draft.version += 1
+        save(conn, project_id, draft)
+        mid = record(conn, project_id, "continue:" + body.digest, "user", {"content": f"当前阶段评审已确认，继续 {next_stage} 方案设计。"})
+        store.add_intent(conn, project_id, "Continue reviewed design stage", WorkPackage(
+            role="planner", purpose="design", revision=config.revision, result={"message_id": mid}))
+        return draft
 
 
 @router.post("/reopen", dependencies=[Depends(require_operator)])
@@ -415,6 +447,8 @@ def publish(project_id: str, body: Version):
         if prior:
             return prior
         config = store.project(conn, project_id, active=True)
+        if draft.stage != "plan" or draft.candidate.get("kind", "final") != "final":
+            raise HTTPException(409, "Only the final plan can be published for development")
         if config.phase != "design" or body.version != draft.version or body.digest != digest(draft):
             raise HTTPException(409, "Confirm the exact frozen design version")
         candidate = draft.candidate
