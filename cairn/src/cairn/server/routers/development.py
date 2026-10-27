@@ -185,10 +185,12 @@ def stream(project_id: str, run_id: str, channel: str):
 
 @router.get("", dependencies=[Depends(require_reader)])
 def state(project_id: str):
+    from cairn.server.work_resources import scheduling
     with get_conn() as conn:
         config = store.project(conn, project_id)
         return {
             "project": config,
+            "scheduling": scheduling(conn, project_id),
             "runs": [public_run(r) for r in conn.execute(
                 "SELECT * FROM runs WHERE project_id=? AND (state='running' OR id IN "
                 "(SELECT id FROM runs WHERE project_id=? ORDER BY rowid DESC LIMIT 100)) ORDER BY rowid DESC", (project_id, project_id))],
@@ -274,8 +276,9 @@ def claim(project_id: str, intent_id: str, body: RunClaim):
         if conn.execute("SELECT 1 FROM runs WHERE project_id=? AND intent_id=? AND state='running'",
                         (project_id, intent_id)).fetchone():
             raise HTTPException(409, "Work package already has a live run")
-        for held in conn.execute("SELECT i.work FROM runs r JOIN intents i ON i.project_id=r.project_id AND i.id=r.intent_id WHERE r.state='running'"):
-            conflict = set(value.resources).intersection(WorkPackage.model_validate_json(held["work"]).resources)
+        from cairn.server.work_resources import resource_conflicts
+        for held in conn.execute("SELECT r.project_id,i.work FROM runs r JOIN intents i ON i.project_id=r.project_id AND i.id=r.intent_id WHERE r.state='running'"):
+            conflict = resource_conflicts(value.resources, project_id, WorkPackage.model_validate_json(held["work"]).resources, held["project_id"])
             if conflict:
                 raise HTTPException(409, "Shared resource is in use: " + ", ".join(sorted(conflict)))
         run_id, token = str(uuid.uuid4()), secrets.token_urlsafe(32)

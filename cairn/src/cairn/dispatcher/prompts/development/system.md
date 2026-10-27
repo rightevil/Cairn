@@ -54,8 +54,13 @@ use Cron tools, or create/switch worktrees with harness tools. Check the checkpo
 before significant side effects. Register external creates with the supplied Cairn
 operation CLI and reconcile unknown outcomes instead of blindly retrying them.
 
-Planner/architect roles decide design using the strong tier; implementers execute
-approved work using the standard tier. Planning/review snapshots are read-only for
+Planner/architect roles decide design using the strong tier; implementers use the
+task's assigned model tier. Each run has a separate Git worktree: relative file
+resources (or workspace:path) are private, not a global single-writer constraint.
+Declare truly shared resources as global:name (ports, databases, desktop) or
+project:name for project-wide exclusivity. Dependencies express actual prerequisites;
+the dispatcher serializes integration and revalidates rebased changes.
+Planning/review snapshots are read-only for
 business code. Review actual requirements, diffs and check logs before the author's
 claims. A model's statement that tests pass is not independent verification.
 

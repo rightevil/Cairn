@@ -89,8 +89,36 @@ function developmentFeatures() {
       return this.statusLabel(text);
     },
 
-    developmentRole(role) {
-      return { planner: '规划 · 强模型', implementer: '实现 · 普通模型', reviewer: '独立审查', architect: '设计／方向 · 强模型', integration: '合并与集成验证' }[role] || role;
+    developmentRole(role, run = null) {
+      const work = this.project?.intents?.find(i => i.id === run?.intent_id)?.work;
+      const tier = run?.result?.snapshot?.tier || (role === 'implementer' ? work?.model_tier : null);
+      const label = { planner: '规划', implementer: '实现', reviewer: '独立审查', architect: '设计／方向', integration: '合并与集成验证' }[role] || role;
+      return label + (tier ? ' · ' + (tier === 'strong' ? '强模型' : '普通模型') : '');
+    },
+
+    taskWait(intent) {
+      return this.developmentState.scheduling?.[intent.id]?.detail || '';
+    },
+
+    planParallelWidth() {
+      const tasks = this.designDraft.work || [], levels = new Map(), visiting = new Set();
+      const level = task => {
+        if (levels.has(task.key)) return levels.get(task.key);
+        if (visiting.has(task.key)) throw new Error('cycle');
+        visiting.add(task.key);
+        const deps = task.dependencies || [];
+        const value = deps.length ? 1 + Math.max(...deps.map(key => {
+          const dep = tasks.find(t => t.key === key);
+          if (!dep) throw new Error('missing');
+          return level(dep);
+        })) : 0;
+        visiting.delete(task.key); levels.set(task.key, value); return value;
+      };
+      try {
+        const counts = {};
+        for (const task of tasks) { const n = level(task); counts[n] = (counts[n] || 0) + 1; }
+        return Math.max(0, ...Object.values(counts));
+      } catch { return 0; }
     },
 
     developmentPhase(intent) {

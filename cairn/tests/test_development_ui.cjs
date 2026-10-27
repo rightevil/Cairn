@@ -207,3 +207,10 @@ console.log('Development UI checks passed: revision phase, live workers, stop/st
   console.log('Folder chooser checks passed: browse, cancel, confirm, repeated opening and cancelled request fencing');
   console.log('New folder checks passed: current parent, trimmed name, duplicate-click protection, navigation and error preservation');
 })().catch(error => { console.error(error); process.exitCode = 1; });
+
+const tierApp = context.cairnApp();
+tierApp.project = {intents:[{id:'strong-task',work:{model_tier:'strong'}}]};
+assert.equal(tierApp.developmentRole('implementer',{intent_id:'strong-task'}),'实现 · 强模型');
+assert.equal(tierApp.developmentRole('reviewer'),'独立审查');
+tierApp.designDraft.work = [{key:'a',dependencies:[]},{key:'b',dependencies:['a']},{key:'c',dependencies:['a']}];
+assert.equal(tierApp.planParallelWidth(),2);

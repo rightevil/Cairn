@@ -381,3 +381,21 @@ def test_uncertain_action_cannot_be_replayed_while_its_original_owner_is_live(ht
     assert http.put(f"{prefix}/{second['id']}/operations/scheduler:watch", json=record).status_code == 409
     http.post(f"{prefix}/{first['id']}/finish", headers=WORKER, json={"token": first["token"], "outcome": "cancelled"}).raise_for_status()
     assert http.put(f"{prefix}/{second['id']}/operations/scheduler:watch", json=record).status_code == 200
+
+
+def test_private_files_parallelize_but_dependencies_and_explicit_locks_still_gate(http, tmp_path):
+    project, _ = create(http, tmp_path)
+    with db.get_conn() as conn:
+        a = store.add_intent(conn, project, "A", WorkPackage(revision=1, resources=["anvil.html", "test/shared.mjs"]))
+        b = store.add_intent(conn, project, "B", WorkPackage(revision=1, resources=["anvil.html", "test/shared.mjs"]))
+        c = store.add_intent(conn, project, "C", WorkPackage(revision=1, dependencies=[a]))
+        d = store.add_intent(conn, project, "D", WorkPackage(revision=1, resources=["global:port:8080"]))
+        e = store.add_intent(conn, project, "E", WorkPackage(revision=1, resources=["port:8080"]))
+    assert claim(http, project, a, role="implementer").status_code == 200
+    assert claim(http, project, b, role="implementer").status_code == 200
+    assert claim(http, project, c, role="implementer").status_code == 409
+    assert claim(http, project, d, role="implementer").status_code == 200
+    assert claim(http, project, e, role="implementer").status_code == 409
+    state = http.get(f"/projects/{project}/development", headers=OPERATOR).json()
+    assert state["scheduling"][c]["status"] == "dependencies"
+    assert state["scheduling"][e]["status"] == "resources"
