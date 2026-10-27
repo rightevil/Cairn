@@ -234,11 +234,50 @@ def test_reference_sections_and_unique_legacy_file_ids_share_submit_readiness(ht
     with db.get_conn() as conn:
         draft = load(conn, project)
         draft.documents['prd-file'] = 'artifacts/design/product/product.md'
+        source = repository / '.cairn/artifacts/design/product/product.md'
+        source.parent.mkdir(parents=True)
+        source.write_text('# Product\nFR-2: A confirmed behavior', encoding='utf-8')
         draft.work[0].spec_refs = ['requirements#FR-1', 'product#FR-2']
         save(conn, project, draft)
     assert http.get(url(project), headers=OPERATOR).json()['readiness']['ready']
     frozen = freeze(http, project)
     assert frozen['work'][0]['spec_refs'] == ['requirements#FR-1', 'prd-file#FR-2']
+    assert 'FR-2: A confirmed behavior' in frozen['documents']['prd-file']
+    assert frozen['document_sources']['prd-file'] == 'artifacts/design/product/product.md'
+
+
+def test_document_preview_loads_body_and_freeze_keeps_an_immutable_snapshot(http, repository):
+    project, _, _, _ = ready(http, repository)
+    from cairn.server.design import load, save
+    source = repository / '.cairn/artifacts/spec.md'
+    source.parent.mkdir(parents=True)
+    source.write_text('# Specification\nActual requirements', encoding='utf-8')
+    with db.get_conn() as conn:
+        draft = load(conn, project)
+        draft.documents['requirements'] = 'artifacts/spec.md'
+        save(conn, project, draft)
+    state = http.get(url(project), headers=OPERATOR).json()
+    assert 'Actual requirements' in state['document_views']['requirements']
+    assert state['readiness']['ready']
+    frozen = freeze(http, project)
+    source.write_text('Changed after freeze', encoding='utf-8')
+    state = http.get(url(project), headers=OPERATOR).json()
+    assert state['document_views']['requirements'] == frozen['documents']['requirements']
+    assert 'Changed after freeze' not in state['document_views']['requirements']
+
+
+@pytest.mark.parametrize('path', ['artifacts/missing.md', 'artifacts/../../secret.md'])
+def test_unreadable_document_references_block_readiness_without_exposing_files(http, repository, path):
+    project, _, _, _ = ready(http, repository)
+    from cairn.server.design import load, save
+    (repository / 'secret.md').write_text('Private contents', encoding='utf-8')
+    with db.get_conn() as conn:
+        draft = load(conn, project)
+        draft.documents['requirements'] = path
+        save(conn, project, draft)
+    state = http.get(url(project), headers=OPERATOR).json()
+    assert not state['readiness']['ready'] and state['document_errors']
+    assert 'Private contents' not in str(state)
 
 
 @pytest.mark.parametrize('reference', ['unknown#FR-1', 'requirements#', 'product#FR-2'])

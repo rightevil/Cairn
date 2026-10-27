@@ -5,6 +5,13 @@ function designFeatures() {
     designStream: null, designStreamProject: '', designSending: false, designMessageId: '', designCommandIndex: 0, designCommandOpen: true,
     designError: '', designDocument: '', designFollowPending: false, designMessageSignature: '',
     designReadiness: { ready: false, issues: ['正在检查提交条件'], version: -1 },
+    designDocuments: {}, designDocumentErrors: [],
+
+    openDesignDocument(name) {
+      const text = this.designDocuments[name];
+      if (!text) { this.designError = '此文档尚无可读取的正文，请查看方案面板中的文件错误。'; return; }
+      this.developmentArtifact = { open: true, name, text, markdown: true };
+    },
 
     canSubmitDesign() {
       return !this.designSending && !this.designBusy() && this.designReadiness.ready
@@ -49,11 +56,14 @@ function designFeatures() {
         this.designProject = id; this.designEntries = []; this.designCursor = 0; this.designInput = '';
         this.designAnswers = {}; this.designMessageId = ''; this.designDocument = '';
         this.designReadiness = { ready: false, issues: ['正在检查提交条件'], version: -1 };
+        this.designDocuments = {}; this.designDocumentErrors = [];
       }
       try {
         const state = await this.api('GET', `/projects/${id}/development/design?after=${this.designCursor}`);
         if (this.selectedProjectId !== id) return;
         this.designDraft = state.draft;
+        this.designDocuments = state.document_views || {};
+        this.designDocumentErrors = state.document_errors || [];
         this.designReadiness = state.readiness || { ready: false, issues: ['请重启 Cairn 以加载提交校验'], version: -1 };
         for (const item of state.messages) this.designReceive(item);
         this.designError = '';

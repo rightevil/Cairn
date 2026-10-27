@@ -47,6 +47,7 @@ class Draft(DevelopmentModel):
     version: int = 0
     stage: Literal["brief", "requirements", "ux", "architecture", "plan"] = "brief"
     documents: dict[str, str] = {}
+    document_sources: dict[str, str] = {}
     decisions: list[str] = []
     questions: list[Question] = []
     work: list[PlannedWork] = []
@@ -119,7 +120,10 @@ def state(project_id: str, after: int = 0, input_id: int | None = None):
                 "SELECT * FROM (SELECT * FROM design_messages WHERE project_id=? AND kind='user' AND id<=? ORDER BY id DESC LIMIT 20) ORDER BY id", (project_id, input_id))]
         else:
             history = messages(conn, project_id, after)
-        return {"draft": draft, "messages": history, "readiness": readiness(conn, project_id, draft)}
+        from cairn.server.design_documents import resolve_documents
+        documents, _, document_errors = resolve_documents(conn, project_id, draft)
+        return {"draft": draft, "messages": history, "readiness": readiness(conn, project_id, draft),
+                "document_views": documents, "document_errors": document_errors}
 
 
 def ensure_idle(conn, project_id):
@@ -143,8 +147,10 @@ def document_id(documents, reference):
 
 def readiness(conn, project_id, draft):
     from cairn.server.development_workflow import validate_plan
+    from cairn.server.design_documents import resolve_documents
     config = store.project(conn, project_id)
     issues = []
+    issues.extend(resolve_documents(conn, project_id, draft)[2])
     if config.phase != "design":
         issues.append("项目已进入开发阶段")
     if conn.execute("SELECT status FROM projects WHERE id=?", (project_id,)).fetchone()["status"] != "active":
@@ -318,6 +324,10 @@ def freeze(project_id: str, body: Version):
         for task in draft.work:
             task.spec_refs = [document_id(draft.documents, ref) + ("#" + ref.partition("#")[2] if "#" in ref else "")
                               for ref in task.spec_refs]
+        from cairn.server.design_documents import resolve_documents
+        draft.documents, draft.document_sources, document_errors = resolve_documents(conn, project_id, draft)
+        if document_errors:
+            raise HTTPException(422, "；".join(document_errors))
         outcome = DevelopmentOutcome(kind="plan", summary="User-facing design candidate", work=draft.work)
         author = conn.execute("SELECT r.* FROM runs r JOIN intents i ON i.project_id=r.project_id AND i.id=r.intent_id "
                               "WHERE r.project_id=? AND r.state='success' AND json_extract(i.work,'$.purpose')='design' "
