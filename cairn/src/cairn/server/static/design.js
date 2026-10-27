@@ -11,7 +11,14 @@ function designFeatures() {
     designReviewStatus() {
       const review = this.designReview;
       if (!review) return '';
-      if (!review.current) return '上一轮评审 · 已归档';
+      if (!review.current) {
+        if (review.revision?.state === 'ready') return '修订已排队，等待设计 Agent 领取';
+        if (review.revision?.state === 'running') return '设计 Agent 正在根据评审意见修订';
+        if (review.revision?.state === 'implemented') return '修订输出已返回，等待校验';
+        if (review.revision?.state === 'waiting') return '修订暂停，请查看设计 Agent 的等待原因';
+        if (review.revision?.state === 'verified') return '修订已完成，请核对新草案后重新送审';
+        return '上一轮评审 · ' + (review.verdict && review.verdict !== 'pending' ? this.reviewLabel(review.verdict) : '未完成') + '（已归档）';
+      }
       if (review.verdict !== 'pending') return this.reviewLabel(review.verdict);
       const run = review.run;
       if (run?.state === 'running') {
@@ -24,11 +31,16 @@ function designFeatures() {
       return '已排队，等待独立评审 Agent 领取';
     },
 
+    canRecoverDesignRevision() {
+      return !this.designDraft.candidate.digest && !!this.designReview?.summary && !this.designBusy()
+        && !this.designReview.revision && !this.designDraft.session;
+    },
+
     openDesignReviewReport() {
       const review = this.designReview;
       if (!review?.summary) return;
       this.developmentArtifact = { open: true, name: '独立评审报告 · v' + review.version, markdown: true,
-        text: `# 独立评审报告\n\n冻结版本：v${review.version} · ${this.stageLabel(review.stage)}\n\n评审任务：${review.intent_id}\n\n${review.summary}` };
+        text: `# 独立评审报告\n\n冻结版本：v${review.version} · ${this.stageLabel(review.stage)}\n\n评审任务：${review.intent_id}\n\n结论：${this.reviewLabel(review.verdict)}\n\n${review.summary}` };
     },
 
     openDesignDocument(name) {
@@ -184,11 +196,12 @@ function designFeatures() {
       const projectId = this.selectedProjectId;
       try {
         await this.api('POST', `/projects/${projectId}/development/design/${action}`, {
-          version: this.designDraft.version, digest: this.designDraft.candidate.digest || ''
+          version: this.designDraft.version, digest: this.designDraft.candidate.digest || (action === 'reopen' ? this.designReview?.digest : '') || ''
         });
         if (this.selectedProjectId !== projectId) return;
         await this.loadProject(this.selectedProjectId);
         if (action === 'publish') { this.setStage('development'); this.showToast('已确认此版本，原生任务已交给 Cairn 执行'); }
+        if (action === 'reopen') this.showToast('修订已排队，设计 Agent 将接收评审意见并保存新草案');
       } catch (e) { if (this.selectedProjectId === projectId) this.designError = e.message; }
       finally { this.designSending = false; }
     },

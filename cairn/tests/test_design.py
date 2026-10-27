@@ -287,11 +287,70 @@ def test_reopen_preserves_design_and_interrupt_fences_late_writes(http, reposito
     reopened = http.post(url(project, '/reopen'), headers=OPERATOR, json={'version': draft['version']})
     assert reopened.status_code == 200, reopened.text
     assert reopened.json()['documents'] == draft['documents'] and not reopened.json()['candidate']
-    run = claim(http, project, send(http, project, 'Revise', 'revision')).json()
+    tasks = http.get(f'/projects/{project}').json()['intents']
+    iid = next(i['id'] for i in tasks if i['work']['purpose'] == 'design' and i['work']['state'] == 'ready')
+    run = claim(http, project, iid).json()
     assert http.post(url(project, '/interrupt'), headers=OPERATOR).status_code == 200
     assert agent(http, project, run, 'text', {'text': 'Late answer'}).status_code == 409
     finish(http, project, run, {'kind': 'design', 'summary': 'Cancelled'}, outcome='cancelled')
     send(http, project, 'Continue from saved draft', 'continue')
+
+
+@pytest.mark.parametrize('legacy', [False, True])
+@pytest.mark.parametrize('baseline_changed', [False, True])
+def test_review_revision_restores_context_queues_once_and_requires_new_review(http, repository, legacy, baseline_changed):
+    project, _, _, task = ready(http, repository)
+    frozen = freeze(http, project)
+    review(http, project, frozen, verdict='request_changes')
+    from cairn.server.design import load, save
+    if legacy:
+        with db.get_conn() as conn:
+            draft = load(conn, project)
+            subject = draft.candidate['subject']
+            draft.candidate, draft.baseline, draft.session = {}, '', None
+            draft.version += 1
+            save(conn, project, draft)
+            from cairn.server.development_workflow import all_work
+            for iid, value in all_work(conn, project):
+                if iid == subject or value.subject == subject:
+                    value.state = 'superseded'
+                    store.save_work(conn, project, iid, value)
+    if baseline_changed:
+        git(repository, 'commit', '--allow-empty', '-m', 'New baseline')
+    previous = http.get(url(project), headers=OPERATOR).json()['draft']
+    payload = {'version': previous['version'], 'digest': frozen['candidate']['digest']}
+    response = http.post(url(project, '/reopen'), headers=OPERATOR, json=payload)
+    assert response.status_code == 200, response.text
+    draft = response.json()
+    assert draft['session'] == frozen['session']
+    assert draft['baseline'] == git(repository, 'rev-parse', 'HEAD')
+    assert draft['documents'] == frozen['documents'] and draft['work'] == frozen['work']
+    assert http.post(url(project, '/reopen'), headers=OPERATOR, json=payload).status_code == 200
+    tasks = http.get(f'/projects/{project}').json()['intents']
+    queued = [i for i in tasks if i['work']['purpose'] == 'design' and i['work']['state'] == 'ready']
+    assert len(queued) == 1
+    feedback = queued[0]['work']['result']['revision_feedback']
+    assert feedback['summary'] == 'Independent review' and feedback['verdict'] == 'request_changes'
+    assert feedback['output']['verdict'] == 'request_changes'
+    assert feedback['version'] == frozen['version'] and feedback['baseline_changed'] == baseline_changed
+    status = http.get(url(project), headers=OPERATOR).json()
+    assert status['review']['revision']['state'] == 'ready' and not status['readiness']['ready']
+    run = claim(http, project, queued[0]['id']).json()
+    assert agent(http, project, run, 'session', {'session': draft['session'], 'baseline': draft['baseline']}).status_code == 200
+    response = agent(http, project, run, 'draft', {'version': draft['version'], 'stage': 'plan',
+        'documents': draft['documents'], 'decisions': ['Addressed each review finding'], 'work': [task]})
+    assert response.status_code == 200, response.text
+    finish(http, project, run, {'kind': 'design', 'summary': 'Revision saved'})
+    again = freeze(http, project)
+    assert again['candidate']['review'] == 'pending' and again['version'] > frozen['version']
+
+
+def test_revision_rejects_a_stale_review_digest(http, repository):
+    project, _, _, _ = ready(http, repository)
+    frozen = freeze(http, project)
+    response = http.post(url(project, '/reopen'), headers=OPERATOR, json={'version': frozen['version'], 'digest': 'wrong'})
+    assert response.status_code == 409
+    assert http.get(url(project), headers=OPERATOR).json()['draft']['candidate'] == frozen['candidate']
 
 
 @pytest.mark.parametrize('fault', ['cycle', 'missing_ref', 'missing_dependency', 'no_checks'])

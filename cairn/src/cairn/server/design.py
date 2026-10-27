@@ -131,11 +131,13 @@ def review_state(conn, project_id, draft):
     output = value.result.get("output", {})
     frozen = author.result.get("design_snapshot", {})
     current = draft.candidate.get("subject") == subject
+    revision = next(({"intent_id": rid, "state": item.state} for rid, item in reversed(work)
+                     if item.purpose == "design" and item.result.get("revision_feedback", {}).get("digest") == author.result["design_candidate"]), None)
     return {"subject": subject, "intent_id": iid, "version": frozen.get("version"), "stage": frozen.get("stage"),
             "digest": author.result["design_candidate"], "current": current, "work_state": value.state,
             "summary": draft.candidate.get("summary", "") if current else output.get("summary", ""),
             "verdict": draft.candidate.get("review", "pending") if current else output.get("verdict"),
-            "checkpoint": value.checkpoint, "retry_at": value.retry_at, "run": run, "attempts": len(runs)}
+            "checkpoint": value.checkpoint, "retry_at": value.retry_at, "run": run, "attempts": len(runs), "revision": revision}
 
 
 @router.get("", dependencies=[Depends(require_reader)])
@@ -189,8 +191,12 @@ def readiness(conn, project_id, draft):
         ensure_idle(conn, project_id)
     except HTTPException:
         issues.append("请等待当前任务完成并应用结果")
-    if not draft.documents or not draft.baseline or not draft.session:
-        issues.append("尚缺方案文档、代码基线或设计会话")
+    if not draft.documents:
+        issues.append("尚缺方案文档")
+    if not draft.baseline:
+        issues.append("尚缺代码基线，请启动设计 Agent 核对当前代码")
+    if not draft.session:
+        issues.append("尚缺设计会话，请启动或恢复设计 Agent")
     if any(q.answer is None for q in draft.questions):
         issues.append("请先回答所有待决问题")
     if config.revision != config.requested_revision or draft.control_revision != config.revision:
@@ -426,22 +432,57 @@ def continue_stage(project_id: str, body: Version):
 @router.post("/reopen", dependencies=[Depends(require_operator)])
 def reopen(project_id: str, body: Version):
     from cairn.server.development_workflow import all_work
+    from cairn.dispatcher.runtime.git_workspace import git, GitError
+    from pathlib import Path
     with get_conn() as conn:
         conn.execute("BEGIN IMMEDIATE")
+        config = store.project(conn, project_id, active=True)
         draft = load(conn, project_id)
+        work = all_work(conn, project_id)
+        if any(w.purpose == "design" and w.result.get("reopened_from") == body.model_dump() for _, w in work):
+            return draft
         if body.version != draft.version:
             raise HTTPException(409, "Design version changed")
         ensure_idle(conn, project_id)
-        if store.project(conn, project_id).phase != "design":
+        if config.phase != "design":
             raise HTTPException(409, "Use blackboard directives to revise executing work")
-        subject = draft.candidate.get("subject")
-        for iid, w in all_work(conn, project_id):
-            if iid == subject or w.subject == subject and subject:
+        review = review_state(conn, project_id, draft)
+        subject = draft.candidate.get("subject") or (review or {}).get("subject")
+        if not subject:
+            raise HTTPException(409, "No frozen design or previous review is available to revise")
+        author = store.work(conn, project_id, subject)
+        frozen = author.result["design_snapshot"]
+        if body.digest and body.digest != author.result["design_candidate"]:
+            raise HTTPException(409, "Review candidate changed; reload before requesting revision")
+        try:
+            repository = Path(config.repository)
+            branch = config.integration_branch or git(repository, "symbolic-ref", "--short", "HEAD")
+            baseline = git(repository, "rev-parse", "refs/heads/" + branch)
+        except (GitError, OSError) as exc:
+            raise HTTPException(409, "Cannot inspect repository baseline for design revision") from exc
+        feedback = {"digest": author.result["design_candidate"], "version": frozen["version"],
+                    "stage": frozen["stage"], "baseline": frozen["baseline"],
+                    "review_intent": (review or {}).get("intent_id"), "review_run": ((review or {}).get("run") or {}).get("id"),
+                    "verdict": (review or {}).get("verdict"), "summary": (review or {}).get("summary", ""),
+                    "output": store.work(conn, project_id, review["intent_id"]).result.get("output", {}) if review else {},
+                    "baseline_changed": baseline != frozen["baseline"]}
+        for iid, w in work:
+            if iid == subject or w.subject == subject or w.purpose == "design" and w.state == "waiting":
                 w.state = "superseded"
                 store.save_work(conn, project_id, iid, w)
-        draft.candidate, draft.baseline, draft.session = {}, "", None
+        config.revision = config.requested_revision
+        store.save_project(conn, project_id, config)
+        draft.candidate, draft.baseline = {}, baseline
+        draft.session = draft.session or frozen.get("session")
+        draft.documents.update({key: source for key, source in draft.document_sources.items() if key in draft.documents})
         draft.version += 1
         save(conn, project_id, draft)
+        mid = record(conn, project_id, f"revise:{subject}:{body.version}", "user", {
+            "content": "请根据上一轮独立评审修订当前方案，逐项核对意见并保存新草案；完成后等待我重新送审，不得自行发布。"})
+        iid = store.add_intent(conn, project_id, "Revise design using independent review", WorkPackage(
+            role="planner", purpose="design", revision=config.revision, result={"message_id": mid,
+                "revision_feedback": feedback, "reopened_from": body.model_dump()}))
+        store.event(conn, project_id, "design_revision_requested", iid, f"Revise frozen v{frozen['version']} using review {feedback['review_intent']}")
         return draft
 
 

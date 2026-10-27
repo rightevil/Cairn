@@ -153,6 +153,8 @@ async def run_turn(dispatcher, project, intent, worker, run, directory, snapshot
                     self.job = None
 
     context = {"draft": draft, "snapshot": str(snapshot), "workspace": str(workspace),
+               "revision_feedback": intent.work.result.get("revision_feedback"),
+               "independent_review": state.get("review"),
                "controls": [{"id": h.id, "content": h.content, "control": h.control.model_dump()} for h in project.hints if h.control],
                "conversation": [m for m in state["messages"] if m["kind"] in ("user", "text", "questions")],
                "native_work_schema": PlannedWork.model_json_schema()}

@@ -134,7 +134,7 @@ def test_sdk_turn_automatically_orchestrates_and_resumes_with_persisted_question
     project = SimpleNamespace(project=SimpleNamespace(id='project', development=SimpleNamespace(repository=str(tmp_path / 'repository'))), hints=[])
     dispatcher = SimpleNamespace(directory=tmp_path, config=SimpleNamespace(design=None), call=call)
     worker = SimpleNamespace(env={'ANTHROPIC_MODEL': 'strong'}, model=None)
-    intent = SimpleNamespace(work=SimpleNamespace(result={'message_id': 1}))
+    intent = SimpleNamespace(work=SimpleNamespace(result={'message_id': 1, 'revision_feedback': {'summary': 'Fix the write conflict', 'version': 97}}))
     output, session = asyncio.run(design_session.run_turn(dispatcher, project, intent, worker,
         {'id': 'run', 'token': 'lease'}, directory, tmp_path / 'snapshot', TaskCancellation()))
     assert output['kind'] == 'design'
@@ -153,4 +153,5 @@ def test_sdk_turn_automatically_orchestrates_and_resumes_with_persisted_question
     assert any(e['kind'] == 'questions' for e in events)
     assert any(e['kind'] == 'activity' and e['data']['skill'] == 'bmad-prd' for e in events)
     assert 'Explicit choice' in (workspace / 'context.json').read_text()
+    assert 'Fix the write conflict' in (workspace / 'context.json').read_text()
     assert session == resume if resume else bool(session)
