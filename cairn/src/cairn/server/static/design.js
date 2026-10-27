@@ -7,7 +7,9 @@ function designFeatures() {
     designReadiness: { ready: false, issues: ['正在检查提交条件'], version: -1 },
     designDocuments: {}, designDocumentErrors: [], designArtifactDirectory: '',
     designReview: null,
-    designPanelTab: 'review', designDeliveries: {}, agentSessionKey: '', agentRunTexts: {}, agentLoading: false, agentError: '',
+    designPanelTab: 'review', designDeliveries: {}, agentSessionKey: '', agentRunTexts: {}, agentRunStates: {}, agentLoading: false, agentError: '', toolOpen: {},
+
+    toolHTML(entry) { return agentToolHTML(entry, this.toolOpen[entry.id]); },
 
     projectSessions() { return this.developmentState.sessions || []; },
     selectedAgentSession() { return this.projectSessions().find(s => s.key === this.agentSessionKey && !s.main) || null; },
@@ -35,13 +37,13 @@ function designFeatures() {
       this.agentLoading = true;
       try {
         for (const run of session.runs) {
-          if (session.main && run.design_conversation) continue;
-          if (!run.streams?.stdout || run.state !== 'running' && this.agentRunTexts[run.id] !== undefined) continue;
+          if (!run.streams?.stdout || run.state !== 'running' && this.agentRunTexts[run.id] !== undefined && this.agentRunStates[run.id] === run.state) continue;
           const response = await fetch(`/projects/${projectId}/development/runs/${run.id}/stream/stdout`);
           if (!response.ok) throw new Error('会话输出暂不可用，请稍后重试');
           const text = await response.text();
           if (this.selectedProjectId !== projectId || (session.main ? !!this.agentSessionKey : this.agentSessionKey !== session.key)) return;
           this.agentRunTexts[run.id] = text;
+          this.agentRunStates[run.id] = run.state;
         }
         this.agentError = '';
         if (follow) this.$nextTick(() => { history.scrollTop = history.scrollHeight; });
@@ -49,7 +51,7 @@ function designFeatures() {
       finally { this.agentLoading = false; }
     },
     deliveryLabel(id) {
-      return {queued:'已保存 · 待投递',sending:'正在投递，尚未确认',delivered:'已送达运行进程',uncertain:'投递结果待核对，请勿盲目重发'}[this.designDeliveries[id]] || '';
+      return {queued:'已保存 / 待投递',sending:'正在投递，尚未确认',delivered:'已送达运行进程',uncertain:'投递结果待核对，请勿盲目重发'}[this.designDeliveries[id]] || '';
     },
 
     designReviewStatus() {
@@ -61,7 +63,7 @@ function designFeatures() {
         if (review.revision?.state === 'implemented') return '修订输出已返回，等待校验';
         if (review.revision?.state === 'waiting') return '修订暂停，请查看设计 Agent 的等待原因';
         if (review.revision?.state === 'verified') return '修订已完成，请核对新草案后重新送审';
-        return '上一轮评审 · ' + (review.verdict && review.verdict !== 'pending' ? this.reviewLabel(review.verdict) : '未完成') + '（已归档）';
+        return '上一轮评审 / ' + (review.verdict && review.verdict !== 'pending' ? this.reviewLabel(review.verdict) : '未完成') + '（已归档）';
       }
       if (review.verdict !== 'pending') return this.reviewLabel(review.verdict);
       const run = review.run;
@@ -83,8 +85,8 @@ function designFeatures() {
     openDesignReviewReport() {
       const review = this.designReview;
       if (!review?.summary) return;
-      this.developmentArtifact = { open: true, name: '独立评审报告 · v' + review.version, markdown: true,
-        text: `# 独立评审报告\n\n冻结版本：v${review.version} · ${this.stageLabel(review.stage)}\n\n评审任务：${review.intent_id}\n\n结论：${this.reviewLabel(review.verdict)}\n\n${review.summary}` };
+      this.developmentArtifact = { open: true, name: '独立评审报告 / v' + review.version, markdown: true,
+        text: `# 独立评审报告\n\n冻结版本：v${review.version} / ${this.stageLabel(review.stage)}\n\n评审任务：${review.intent_id}\n\n结论：${this.reviewLabel(review.verdict)}\n\n${review.summary}` };
     },
 
     openDesignDocument(name) {
@@ -99,8 +101,8 @@ function designFeatures() {
     },
 
     visibleDesignEntries() {
-      const extra = (this.projectSessions().find(s => s.main)?.runs || []).filter(r => !r.design_conversation)
-        .flatMap(run => agentOutput(this.agentRunTexts[run.id] || '').map(entry => ({...entry,id:run.id + ':' + entry.id,role:entry.role === 'Agent' ? 'Claude' : '工作流'})));
+      const extra = (this.projectSessions().find(s => s.main)?.runs || [])
+        .flatMap(run => agentOutput(this.agentRunTexts[run.id] || '').filter(entry => !run.design_conversation || entry.kind === 'tool').map(entry => ({...entry,id:run.id + ':' + entry.id,role:entry.role === 'Agent' ? 'Claude' : '工作流'})));
       return [...this.designEntries, ...extra].filter(entry => String(entry.text || '').replace(/[\s\u200B-\u200D\uFEFF]/g, '').length);
     },
 
@@ -134,7 +136,7 @@ function designFeatures() {
         if (existing) existing.text = data.mode === 'snapshot' ? data.text : existing.text + data.text;
         else this.designEntries.push({ id: item.id, block: data.block, role: 'Claude', text: data.text });
       }
-      if (item.kind === 'activity') this.designEntries.push({ id: item.id, role: '工作流', text: [data.tool, data.skill].filter(Boolean).join(' · ') });
+      if (item.kind === 'activity') this.designEntries.push({ id: item.id, role: '工作流', text: [data.tool, data.skill].filter(Boolean).join(' / ') });
       if (follow && !this.designFollowPending) {
         this.designFollowPending = true;
         this.$nextTick(() => { history.scrollTop = history.scrollHeight; this.designFollowPending = false; });

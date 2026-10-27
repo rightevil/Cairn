@@ -1,11 +1,6 @@
 <!doctype html>
-<html lang="zh-CN">
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Cairn · Agent 运行窗口</title>
-<style>
-body{margin:0;background:#0f172a;color:#e2e8f0;font:14px system-ui,sans-serif}header{padding:20px;border-bottom:1px solid #334155;display:flex;gap:16px;flex-wrap:wrap;align-items:center}h1{font-size:17px;margin:0}small{color:#94a3b8}button,input,select{padding:8px;background:#1e293b;color:#e2e8f0;border:1px solid #475569;border-radius:6px}button{cursor:pointer}main{padding:20px}pre{white-space:pre-wrap;overflow-wrap:anywhere;font:13px/1.7 ui-monospace,monospace}#error{color:#fda4af}#token{max-width:450px;width:80%}a{color:#7dd3fc}
-</style>
-<header><h1 id="title">Agent 运行窗口</h1><span id="status"></span><select id="channel" aria-label="输出通道"><option value="stdout">标准输出</option><option value="stderr">错误输出</option></select><label><input type="checkbox" id="raw"> 原始记录</label><a href="/" target="_blank">开发黑板</a></header>
-<main><p><small id="meta">正在读取运行记录…</small></p><small>此窗口连接已有运行，展示实时日志；关闭窗口不会停止 Agent。</small><p id="error" role="alert"></p><pre id="output" aria-live="polite"></pre></main>
-<script src="/static/agent.js"></script>
-</html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="Cairn Agent 会话正文与可展开的工具执行记录。"><title>Cairn Agent 会话</title>
+<link rel="stylesheet" href="/static/tokens.css"><link rel="stylesheet" href="/static/base.css"><link rel="stylesheet" href="/static/workspace.css"></head>
+<body><header class="agent-header"><h1 id="title">Agent 会话</h1><span class="badge" id="status"></span><select id="channel" aria-label="输出通道"><option value="stdout">标准输出</option><option value="stderr">错误输出</option></select><label><input type="checkbox" id="raw"> 原始记录（敏感字段已隐藏）</label><a href="/" target="_blank" rel="noopener">开发黑板</a></header>
+<main class="agent-main"><p><small id="meta">正在读取运行记录…</small></p><p class="muted">连接已有运行，关闭窗口不会停止 Agent。工具详情仅展示已记录的输入与结果。</p><p id="error" role="alert"></p><div id="conversation" role="log" aria-label="Agent 对话记录"></div><pre id="output" hidden></pre></main>
+<script src="/static/vendor/marked-18.0.14.umd.js"></script><script src="/static/vendor/purify-3.4.16.min.js"></script><script src="/static/agent-output.js"></script><script src="/static/agent.js"></script></body></html>

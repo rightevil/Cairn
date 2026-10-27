@@ -6,6 +6,7 @@ function developmentFeatures() {
     developmentNow: Date.now(),
     developmentControl: { kind: 'suggestion', content: '', scope: '', replaces: '' },
     controlSending: false,
+    materialSending: false,
     developmentArtifact: { open: false, name: '', text: '' },
 
     async loadDevelopment(id) {
@@ -30,7 +31,25 @@ function developmentFeatures() {
     },
 
     developmentWork() {
-      return (this.project?.intents || []).filter(intent => intent.work).slice().reverse();
+      return (this.project?.intents || []).filter(intent => intent.work && intent.work.purpose !== 'design' && intent.work.state !== 'superseded').slice().reverse();
+    },
+
+    visibleWork() {
+      return this.developmentWork().filter(i => this.taskFilter === 'active' ? ['running','implemented','reviewing','approved','merged'].includes(i.work.state)
+        : this.taskFilter === 'waiting' ? ['waiting','failed','blocked'].includes(i.work.state) || i.work.state === 'ready' && i.work.dependencies.some(id => this.project.intents.find(d => d.id === id)?.work?.state !== 'verified')
+        : this.taskFilter === 'verified' ? i.work.state === 'verified' : true);
+    },
+
+    async recoverMaterials() {
+      const digest = this.developmentState.material_recovery?.digest;
+      if (!digest || this.materialSending) return;
+      this.materialSending = true;
+      try {
+        await this.api('POST', `/projects/${this.selectedProjectId}/development/materials`, {digest});
+        await this.loadProject(this.selectedProjectId);
+        this.showToast('材料已归档；对应任务可在项目继续后重试');
+      } catch (e) { this.developmentError = e.message; }
+      finally { this.materialSending = false; }
     },
 
     runningDevelopmentRuns() {
@@ -141,7 +160,7 @@ function developmentFeatures() {
     },
 
     controlState(value) {
-      return { received: '已收到 · 待评估', accepted: '已采纳 · 待检查点', experiment: '采用实验', deferred: '暂缓', rejected: '未采纳', applied: '已生效', completed: '已完成验证', replaced: '已替代', revoked: '已撤销' }[value] || value;
+      return { received: '已收到 / 待评估', accepted: '已采纳 / 待检查点', experiment: '采用实验', deferred: '暂缓', rejected: '未采纳', applied: '已生效', completed: '已完成验证', replaced: '已替代', revoked: '已撤销' }[value] || value;
     },
 
     activeDirectives() {
@@ -188,7 +207,7 @@ function developmentFeatures() {
     },
 
     async viewDevelopmentStream(run, channel) {
-      return this.openDevelopmentPreview(`/projects/${this.selectedProjectId}/development/runs/${run.id}/stream/${channel}`, `${channel} · 实时输出（非验收证据）`);
+      return this.openDevelopmentPreview(`/projects/${this.selectedProjectId}/development/runs/${run.id}/stream/${channel}`, `${channel} / 实时输出（非验收证据）`);
     },
 
     async openDevelopmentPreview(url, name) {

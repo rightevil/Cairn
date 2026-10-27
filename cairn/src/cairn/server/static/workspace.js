@@ -6,7 +6,7 @@ function cairnApp() {
     ...developmentFeatures(), ...designFeatures(),
     view: 'list', sideTab: 'design', projects: [], project: null, selectedProjectId: '',
     loadingProject: false, loadingList: true, connectionError: '', polling: false,
-    projectSearch: '', panelOpen: true, boardTab: 'graph', selection: null, graphSignature: '',
+    projectSearch: '', panelOpen: true, boardTab: 'tasks', taskFilter: 'all', graphHistory: false, graphFocus: '', graphRunCursor: -1, selection: null, graphSignature: '',
     showNewProject: false, creatingProject: false, folderOpen: false, folderLoading: false,
     folderState: { directory: null, name: '', parent: null, breadcrumbs: [], entries: [] },
     folderError: '', folderSearch: '', folderRequest: 0,
@@ -26,6 +26,8 @@ function cairnApp() {
           });
         } else if (returnFocus.get(field)?.isConnected) returnFocus.get(field).focus();
       });
+      this.$watch('boardTab', () => this.rememberBoard());
+      this.$watch('taskFilter', () => this.rememberBoard());
       await this.loadProjects();
       await this.route();
       setInterval(() => { if (this.selectedAgentSession()) this.loadAgentConversation(); }, 1000);
@@ -94,6 +96,16 @@ function cairnApp() {
       if (!id) { this.backToList(); return; }
       if (this.selectedProjectId !== id) await this.openProject(id, params.get('stage'));
       else if (params.get('stage')) this.setStage(params.get('stage'), false);
+      this.boardTab = ['graph','tasks','facts'].includes(params.get('board')) ? params.get('board') : 'tasks';
+      this.taskFilter = ['all','active','waiting','verified'].includes(params.get('filter')) ? params.get('filter') : 'all';
+      this.updateGraph();
+    },
+
+    rememberBoard() {
+      if (!this.selectedProjectId || this.view !== 'graph') return;
+      const params = new URLSearchParams(location.hash.slice(1));
+      params.set('board', this.boardTab); params.set('filter', this.taskFilter);
+      history.replaceState(null, '', '#' + params); this.updateGraph();
     },
 
     navigateProject(id) { location.hash = new URLSearchParams({ project: id }).toString(); },
@@ -280,10 +292,15 @@ function cairnApp() {
     },
 
     graphElements() {
-      const facts = (this.project?.facts || []).map(f => ({ data: { id: 'f:' + f.id, ref: f.id, kind: 'fact', label: f.id === 'origin' ? '代码基线' : f.id === 'goal' ? '项目目标' : f.description.slice(0, 30) } }));
-      const intents = (this.project?.intents || []).filter(i => i.work?.purpose !== 'design' && i.work?.state !== 'superseded');
+      const facts = (this.project?.facts || []).filter(f => this.graphHistory || f.id === 'origin').map(f => ({ data: { id: 'f:' + f.id, ref: f.id, kind: 'fact', label: f.id === 'origin' ? '代码基线' : f.id === 'goal' ? '项目目标' : f.description.slice(0, 30) } }));
+      let intents = [...this.visibleWork(), ...(this.taskFilter === 'all' ? (this.project?.intents || []).filter(i => !i.work) : [])];
+      if (this.graphFocus) {
+        const focus = intents.find(i => i.id === this.graphFocus);
+        const refs = new Set([this.graphFocus, ...(focus?.work?.dependencies || []), ...intents.filter(i => i.work?.dependencies.includes(this.graphFocus)).map(i => i.id)]);
+        intents = intents.filter(i => refs.has(i.id));
+      }
       const nodes = [...facts, ...intents.map(i => ({ data: { id: 'i:' + i.id, ref: i.id, kind: 'intent',
-        label: this.developmentText(i.description).slice(0, 34), state: i.work?.state || (i.to ? 'verified' : i.worker ? 'running' : 'ready') } }))];
+        label: this.graphStateLabel(i) + '\n' + (i.work?.key || i.id) + '\n' + this.developmentText(i.description).slice(0, 34), state: i.work?.state || (i.to ? 'verified' : i.worker ? 'running' : 'ready') } }))];
       const known = new Set(nodes.map(n => n.data.id)), edges = [];
       const add = (source, target, type) => { if (known.has(source) && known.has(target)) edges.push({ data: { id: `${type}:${source}:${target}`, source, target, type } }); };
       for (const i of intents) {
@@ -306,28 +323,54 @@ function cairnApp() {
         if (workspaceGraph && signature === this.graphSignature) { workspaceGraph.resize(); return; }
         this.graphSignature = signature;
         if (workspaceGraph) {
-          workspaceGraph.json({ elements }); workspaceGraph.layout({ name: 'dagre', rankDir: 'LR', fit: false, nodeSep: 42, rankSep: 80 }).run();
+          const zoom = workspaceGraph.zoom(), pan = workspaceGraph.pan();
+          const topology = items => items.map(e => e.data.id).sort().join('|');
+          const previous = workspaceGraph.json().elements;
+          const changed = topology([...(previous.nodes || []), ...(previous.edges || [])]) !== topology(elements);
+          workspaceGraph.json({ elements });
+          if (changed) workspaceGraph.layout({ name: 'dagre', rankDir: 'LR', fit: false, nodeSep: 42, rankSep: 80 }).run();
+          workspaceGraph.zoom(zoom); workspaceGraph.pan(pan);
           return;
         }
-        workspaceGraph = cytoscape({ container, elements, minZoom: 0.2, maxZoom: 2.5,
+        const token = name => getComputedStyle(document.documentElement).getPropertyValue('--graph-' + name).trim();
+        workspaceGraph = cytoscape({ container, elements, minZoom: 0.1, maxZoom: 2.5,
           layout: { name: 'dagre', rankDir: 'LR', padding: 40, nodeSep: 42, rankSep: 80 },
           style: [
-            { selector: 'node', style: { label: 'data(label)', 'font-family': 'system-ui', 'font-size': 12, color: '#334155',
-              'text-wrap': 'wrap', 'text-max-width': 144, 'text-valign': 'center', 'background-color': '#f1f5f9',
-              shape: 'roundrectangle', width: 170, height: 72, 'border-width': 1, 'border-color': '#cbd5e1' } },
-            { selector: 'node[kind="fact"]', style: { 'background-color': '#eaf2ff', 'border-color': '#b7c9eb', shape: 'round-hexagon' } },
-            { selector: 'node[state="running"]', style: { 'background-color': '#e3f5f0', 'border-color': '#38a38b', 'border-width': 2 } },
-            { selector: 'node[state="verified"]', style: { 'background-color': '#e9f4eb', 'border-color': '#9cc5a4' } },
-            { selector: 'node[state="reviewing"], node[state="approved"], node[state="merged"]', style: { 'background-color': '#fff5df', 'border-color': '#e2c381' } },
-            { selector: 'edge', style: { width: 1.5, 'line-color': '#b7c3d2', 'target-arrow-color': '#b7c3d2', 'target-arrow-shape': 'triangle', 'curve-style': 'bezier' } },
-            { selector: 'edge[type="dependency"]', style: { 'line-style': 'dashed', 'line-color': '#8ba6a0', 'target-arrow-color': '#8ba6a0' } },
-            { selector: ':selected', style: { 'border-color': '#147d68', 'border-width': 3 } },
+            { selector:'node', style:{label:'data(label)','font-family':getComputedStyle(document.documentElement).getPropertyValue('--font-body').trim(),'font-size':13,color:token('ink'),'text-wrap':'wrap','text-max-width':172,'text-valign':'center','background-color':token('paper'),shape:'roundrectangle',width:200,height:96,'border-width':2,'border-color':token('muted')} },
+            { selector:'node[kind="fact"]',style:{shape:'hexagon','background-color':token('paper'),'border-color':token('cool'),color:token('cool'),'border-style':'dashed',opacity:.65} },
+            { selector:'node[state="running"]',style:{'border-color':token('accent'),'border-width':4,color:token('accent')} },
+            { selector:'node[state="verified"]',style:{'border-color':token('ok'),color:token('ok'),opacity:.75} },
+            { selector:'node[state="reviewing"], node[state="approved"], node[state="merged"], node[state="implemented"]',style:{'border-color':token('cool'),color:token('cool'),shape:'cutrectangle'} },
+            { selector:'node[state="waiting"], node[state="failed"], node[state="blocked"]',style:{'border-color':token('bad'),color:token('bad'),'border-style':'double'} },
+            { selector:'edge',style:{width:2,'line-color':token('muted'),'target-arrow-color':token('muted'),'target-arrow-shape':'triangle','curve-style':'bezier'} },
+            { selector:'edge[type="fact"]',style:{'line-style':'dashed',opacity:.35} },
+            { selector:':selected',style:{'border-color':token('ink'),'border-width':4} },
           ] });
-        workspaceGraph.on('tap', 'node', event => { this.selectItem(event.target.data('kind'), event.target.data('ref')); });
+        workspaceGraph.on('tap', 'node', event => { this.selectItem(event.target.data('kind'), event.target.data('ref')); if (event.target.data('kind') === 'intent') { this.graphFocus = event.target.data('ref'); this.updateGraph(); } });
         workspaceGraphObserver = new ResizeObserver(() => workspaceGraph?.resize());
         workspaceGraphObserver.observe(container);
       });
     },
-    fitGraph() { workspaceGraph?.fit(undefined, 40); },
+    graphStateLabel(intent) {
+      const state = intent.work?.state || (intent.to ? 'verified' : intent.worker ? 'running' : 'ready');
+      if (state === 'ready' && intent.work?.dependencies.some(id => this.project.intents.find(i => i.id === id)?.work?.state !== 'verified')) return '□ 依赖等待';
+      return ({ready:'□ 待执行',running:'▶ 运行中',reviewing:'◇ 审查中',implemented:'◇ 待审查',approved:'◇ 待集成',merged:'◇ 验证中',verified:'✓ 已验证',waiting:'! 等待处理',failed:'! 失败',blocked:'! 阻塞'})[state] || state;
+    },
+    focusRunning() {
+      this.graphFocus = ''; this.taskFilter = 'all'; this.updateGraph();
+      this.$nextTick(() => {
+        if (!workspaceGraph) return;
+        let nodes = workspaceGraph.nodes().filter(n => n.data('state') === 'running');
+        if (!nodes.length) nodes = workspaceGraph.nodes().filter(n => ['reviewing','implemented','approved','merged'].includes(n.data('state')));
+        if (!nodes.length) { this.showToast('当前没有执行或审查中的任务'); return; }
+        this.graphRunCursor = (this.graphRunCursor + 1) % nodes.length;
+        const target = nodes.filter((n,index) => index === this.graphRunCursor);
+        workspaceGraph.fit(target,20);
+        if (workspaceGraph.zoom() > 1.25) workspaceGraph.zoom(1.25);
+        workspaceGraph.center(target);
+        if (nodes.length > 1) this.showToast(`已定位 ${target[0].data('ref')}（${this.graphRunCursor + 1}/${nodes.length}），再次点击查看下一项`);
+      });
+    },
+    fitGraph() { this.graphFocus = ''; this.updateGraph(); this.$nextTick(() => workspaceGraph?.fit(undefined,40)); },
   };
 }
