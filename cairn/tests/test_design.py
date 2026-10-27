@@ -75,7 +75,7 @@ def review(http, project, draft, *, session='independent', verdict='approve', ev
     iid = next(i['id'] for i in work if i['work']['role'] == 'architect' and i['work']['state'] == 'ready')
     run = claim(http, project, iid, role='architect', worker='reviewer').json()
     finish(http, project, run, {'kind': 'review', 'summary': 'Independent review', 'verdict': verdict},
-           {'design_baseline': draft['baseline'], 'checks_passed': evidence}, session=session)
+           {'design_baseline': draft['baseline'], 'checks_passed': evidence, 'check_scope': 'design_baseline'}, session=session)
     return run
 
 
@@ -209,6 +209,53 @@ def test_review_cannot_self_approve_or_claim_unrun_checks(http, repository, sess
     review(http, project, draft, session=session, evidence=evidence)
     current = http.get(url(project), headers=OPERATOR).json()['draft']
     assert current['candidate']['review'] == 'pending'
+
+
+def test_independent_design_runtime_checks_baseline_without_running_future_tests(http, repository, tmp_path):
+    import hashlib
+    import sys
+    from types import SimpleNamespace
+    from cairn.dispatcher.config import LocalConfig, WorkerConfig
+    from cairn.dispatcher.development import DevelopmentDispatcher
+    from cairn.dispatcher.runtime.cancellation import TaskCancellation
+    from cairn.dispatcher.runtime.local_backend import LocalBackend
+    from test_development_runtime import Client
+    project, _, author, _ = ready(http, repository)
+    from cairn.server.design import load, save
+    marker = tmp_path / 'future-test-ran'
+    with db.get_conn() as conn:
+        evidence = tmp_path / 'runtime' / project / 'runs' / author['id'] / 'stdout.log'
+        evidence.parent.mkdir(parents=True)
+        evidence.write_bytes(b'Design turn saved')
+        conn.execute('UPDATE runs SET evidence=? WHERE id=?', (json.dumps([{'kind': 'log', 'path': str(evidence),
+            'sha256': hashlib.sha256(evidence.read_bytes()).hexdigest()}]), author['id']))
+        draft = load(conn, project)
+        draft.work[0].checks = [[sys.executable, '-c', f'from pathlib import Path; Path({str(marker)!r}).touch()']]
+        save(conn, project, draft)
+    freeze(http, project)
+    work = http.get(f'/projects/{project}').json()['intents']
+    iid = next(i['id'] for i in work if i['work']['role'] == 'architect')
+    run = claim(http, project, iid, role='architect').json()
+    fake = tmp_path / 'review.py'
+    fake.write_text('import json\nprint(json.dumps({"type":"result","session_id":"independent-runtime","result":json.dumps({"kind":"review","verdict":"approve","summary":"Reviewed frozen documents"})}))', encoding='utf-8')
+    local = LocalConfig(workspace_root=str(tmp_path / 'runtime'))
+    client = Client(http)
+    loop = SimpleNamespace(client=client, config=SimpleNamespace(server='in-process', local=local,
+        runtime=SimpleNamespace(interval=1), tasks=SimpleNamespace(development_timeout=10)), container_manager=LocalBackend(local))
+    dispatcher = DevelopmentDispatcher(loop)
+    detail = client.get_project(project)
+    intent = next(i for i in detail.intents if i.id == iid)
+    worker = WorkerConfig(name='independent', type='claudecode', roles=['architect'], tier='strong',
+        command=[sys.executable, str(fake)], max_running=1, priority=0)
+    assert dispatcher.execute(detail, intent, worker, run, TaskCancellation()) == 'success'
+    assert not marker.exists(), 'Design review must not execute planned implementation checks'
+    http.post(f'/projects/{project}/development/advance', headers=WORKER)
+    current = http.get(url(project), headers=OPERATOR).json()['draft']
+    assert current['candidate']['review'] == 'approve'
+    records = client.development(project).data['runs']
+    result = next(r for r in records if r['id'] == run['id'])
+    assert result['result']['snapshot']['check_scope'] == 'design_baseline'
+    assert any(e.get('command') == ['git', 'diff', '--check'] for e in result['evidence'])
 
 
 def test_reopen_preserves_design_and_interrupt_fences_late_writes(http, repository):

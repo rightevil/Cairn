@@ -372,18 +372,16 @@ class DevelopmentDispatcher:
                     parsed = DevelopmentOutcome.model_validate(parse_json_output(response))
                     output, outcome, detail = parsed.model_dump(mode="json"), "success", parsed.summary
                     subject = next((i for i in project.intents if i.id == intent.work.subject), None)
-                    if subject and subject.work.result.get("design_candidate") and parsed.kind == "review" and parsed.verdict == "approve":
+                    if subject and subject.work.result.get("design_candidate") and parsed.kind == "review" and parsed.verdict == "approve" and parsed.within_scope:
                         draft = subject.work.result["design_snapshot"]
                         if frozen_commit != draft["baseline"]:
                             raise RuntimeError("Design baseline changed before independent review")
-                        commands = list(config.checks)
-                        for task in draft["work"]:
-                            for argv in task["checks"]:
-                                if argv not in commands:
-                                    commands.append(argv)
+                        # Planned task checks belong to implementation, not the pre-code baseline.
+                        commands = list(config.checks) or [["git", "diff", "--check"]]
                         passed, checks = repository.checks(worktree, commands, directory, cancellation)
                         evidence.extend(checks)
-                        snapshot.update(design_baseline=frozen_commit, checks_passed=passed)
+                        snapshot.update(design_baseline=frozen_commit, checks_passed=passed,
+                                        check_scope="design_baseline", deferred_task_checks=True)
                         if not passed:
                             raise RuntimeError("Design readiness checks failed; reopen and resolve the recorded failures")
                     if intent.work.role == "implementer" and parsed.kind == "implemented":

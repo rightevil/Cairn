@@ -61,6 +61,19 @@ def test_bmad_scripts_are_argv_only_and_workspace_confined(tmp_path, monkeypatch
         design_skills.run_script(tmp_path, 'render_skill.py', ['--overrides', str(tmp_path / 'artifacts/forged.toml')])
 
 
+def test_resumed_sessions_refresh_host_rules_without_reinstalling_pinned_skills(tmp_path, monkeypatch):
+    import json
+    monkeypatch.setattr(design_skills, 'git', lambda *args: 'pinned')
+    (tmp_path / 'skill-versions.json').write_text(json.dumps({'bmad': 'pinned', 'grilling': 'pinned'}))
+    skill = tmp_path / '.claude/skills/cairn-design/SKILL.md'
+    skill.parent.mkdir(parents=True)
+    skill.write_text('Old rules')
+    design_skills.prepare(tmp_path, SimpleNamespace(bmad_repository='unused', grilling_repository='unused'))
+    assert '设计者自检' in skill.read_text(encoding='utf-8')
+    assert '冻结当前阶段并送独立评审' in skill.read_text(encoding='utf-8')
+    assert json.loads((tmp_path / 'skill-versions.json').read_text())['bmad'] == 'pinned'
+
+
 @pytest.mark.parametrize('resume,content', [(None, 'Design the feature'), ('existing-session', '/bmad-architecture')])
 @pytest.mark.parametrize('text_index,partial,turns,bundled', [(0, 'Question', 1, False), (1, 'Question', 1, False), (3, 'Quest', 1, False), (1, 'Question', 2, False), (1, 'Fir', 1, True)])
 def test_sdk_turn_automatically_orchestrates_and_resumes_with_persisted_questions(tmp_path, monkeypatch, resume, content, text_index, partial, turns, bundled):

@@ -49,11 +49,27 @@ Architecture reads the native requirements document in place of an initiative ti
 BMAD's internal document finalization is not Cairn's publication approval.
 
 Persist after meaningful decisions: stable document IDs, design text, decisions,
-and native tasks with spec_refs pointing to document IDs, explicit dependencies,
-scope, acceptance, and actual argv checks. Keep unready tasks in draft. Tests that
-will be created by implementation must have a runnable baseline readiness check;
-never report a future test as already run. Strong model tier is available for complex
+and native tasks with spec_refs pointing to exact registered document IDs (optionally
+ID#section), explicit dependencies, scope, acceptance, and actual argv checks.
+Documents must contain the complete text or a source path beginning artifacts/;
+include required attachments as registered documents, not only as prose mentions.
+Keep unready tasks in draft. A task's checks run AFTER its implementation and may
+name tests it must create. Design review runs only existing project baseline checks
+(or git diff --check); that is not evidence that future tests or game behavior pass.
+Never report a future test as already run. Documentation lookup establishes a command
+rule only: label it "文档核对，未实际执行项目测试", never "测试已通过".
+Strong model tier is available for complex
 implementation; standard is the default. Use the returned draft version on every save.
+
+Review authority: invoking bmad-review in this design session is design-author
+self-review, even if you use multiple lenses. Announce it as "设计者自检" before
+starting; never call it an independent review. Do not change the native task plan
+under the pretense that an independent reviewer has approved those changes.
+If the user says "同意评审", explain the operator's freeze-and-review button; do not
+silently substitute self-review or claim a review was dispatched. Only the Cairn
+candidate state in context can establish independent review pending or approved.
+Do not claim DAG checks were run unless a tool actually ran them; manual inspection
+and executable validation must be reported separately.
 
 At a stage boundary, save the stage's complete documents and ask the user to use
 "冻结当前阶段并送独立评审" in the scheme panel. A stage review does not need a final

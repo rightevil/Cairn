@@ -356,9 +356,9 @@ def apply_review(conn, project_id, run, value, subject, outcome):
     draft = load(conn, project_id)
     if draft.candidate.get("digest") != subject.result["design_candidate"] or digest(draft) != draft.candidate["digest"]:
         raise ValueError("Frozen design candidate changed")
-    if outcome.verdict == "approve":
+    if outcome.verdict == "approve" and outcome.within_scope:
         snapshot = json.loads(run["result"]).get("snapshot", {})
-        if snapshot.get("design_baseline") != draft.baseline or not snapshot.get("checks_passed") or not json.loads(run["evidence"]):
+        if snapshot.get("design_baseline") != draft.baseline or not snapshot.get("checks_passed") or snapshot.get("check_scope") != "design_baseline" or not json.loads(run["evidence"]):
             raise ValueError("Design approval requires independent baseline checks and raw evidence")
     draft.candidate.update(review=outcome.verdict if outcome.within_scope else "reject", summary=outcome.summary, run_id=run["id"])
     save(conn, project_id, draft)
@@ -470,7 +470,7 @@ def publish(project_id: str, body: Version):
             raise HTTPException(409, "Design publication requires access to the local Git repository") from exc
         review = conn.execute("SELECT result FROM runs WHERE id=?", (candidate["run_id"],)).fetchone()
         snapshot = json.loads(review["result"]).get("snapshot", {}) if review else {}
-        if snapshot.get("design_baseline") != draft.baseline or not snapshot.get("checks_passed"):
+        if snapshot.get("design_baseline") != draft.baseline or not snapshot.get("checks_passed") or snapshot.get("check_scope") != "design_baseline":
             raise HTTPException(409, "Independent baseline and runnable acceptance checks are required")
         config.design = "\n\n".join(f"# {key}\n{content}" for key, content in draft.documents.items())
         config.architecture = draft.documents.get("architecture", config.architecture)

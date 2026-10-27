@@ -12,6 +12,14 @@ BMAD_SKILLS = ("bmad", "bmod-core-tools", "bmod-method", "bmad-product-brief", "
                "bmad-ux", "bmad-architecture", "bmad-agent-po", "bmad-advanced-elicitation", "bmad-review")
 
 
+def refresh_orchestration(directory):
+    path = directory / ".claude" / "skills" / "cairn-design" / "SKILL.md"
+    content = resources.files("cairn.dispatcher.prompts").joinpath("design", "SKILL.md").read_text(encoding="utf-8")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists() or path.read_text(encoding="utf-8") != content:
+        path.write_text(content, encoding="utf-8")
+
+
 def prepare(directory: Path, config):
     if config is None:
         raise RuntimeError("Set design.bmad_repository and design.grilling_repository in the dispatcher configuration")
@@ -21,6 +29,7 @@ def prepare(directory: Path, config):
     if marker.exists():
         if json.loads(marker.read_text(encoding="utf-8")) != versions:
             raise RuntimeError("Design Skill sources changed; restore the pinned commits or start a new design session")
+        refresh_orchestration(directory)
         return
     skills = directory / ".claude" / "skills"
     for name in BMAD_SKILLS:
@@ -29,9 +38,7 @@ def prepare(directory: Path, config):
             raise RuntimeError(f"BMAD Skill is missing: {name}")
         shutil.copytree(source, skills / name, dirs_exist_ok=True, ignore=shutil.ignore_patterns("__pycache__", "tests"))
     shutil.copytree(grilling / "skills" / "productivity" / "grilling", skills / "grilling", dirs_exist_ok=True)
-    orchestration = skills / "cairn-design"
-    orchestration.mkdir(parents=True, exist_ok=True)
-    (orchestration / "SKILL.md").write_text(resources.files("cairn.dispatcher.prompts").joinpath("design", "SKILL.md").read_text(encoding="utf-8"), encoding="utf-8")
+    refresh_orchestration(directory)
     # Keep upstream text intact; local adaptation is explicit and versioned.
     overlay = ("\n## Cairn host adaptation\nThis web session is interactive even when SDK/Skill-invoked. "
                "Follow cairn-design for questions, native draft storage, and PO handoff. "

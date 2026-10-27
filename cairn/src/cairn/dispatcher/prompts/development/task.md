@@ -220,6 +220,15 @@ Role rules:
   If the only reported change is automatic dependency remapping, confirm the existing
   contract in a decision without adding work or rerunning unchanged implementation checks.
 
+For a subject with work.result.design_candidate, this is an independent DESIGN
+review of work.result.design_snapshot, including the full registered documents and
+attachments. Inspect requirement coverage, task size, dependencies, model-tier
+reasons and future acceptance design. Do not implement the plan or create its tests.
+Task checks may target files that the implementation must create; they are future
+acceptance, not current passing evidence. Only existing project baseline checks
+(or git diff --check) run automatically for this review. A passing baseline is not
+a passing game test. State exactly what was read, actually executed, or deferred.
+
 Return exactly one JSON result matching this schema. Optional fields may be omitted.
 Emit the result itself when finished; a progress update or a promise to generate JSON
 is not a result. Save unfinished work in progress_path and return a schema-valid wait.
