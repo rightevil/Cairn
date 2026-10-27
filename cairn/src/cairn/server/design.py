@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+from pathlib import PurePosixPath
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -117,7 +119,7 @@ def state(project_id: str, after: int = 0, input_id: int | None = None):
                 "SELECT * FROM (SELECT * FROM design_messages WHERE project_id=? AND kind='user' AND id<=? ORDER BY id DESC LIMIT 20) ORDER BY id", (project_id, input_id))]
         else:
             history = messages(conn, project_id, after)
-        return {"draft": draft, "messages": history}
+        return {"draft": draft, "messages": history, "readiness": readiness(conn, project_id, draft)}
 
 
 def ensure_idle(conn, project_id):
@@ -127,6 +129,53 @@ def ensure_idle(conn, project_id):
     if any(w.purpose == "design" and w.state in ("ready", "running", "implemented")
            for _, w in all_work(conn, project_id)):
         raise HTTPException(409, "A design message is already queued")
+
+
+def document_id(documents, reference):
+    name = reference.partition("#")[0]
+    if name in documents:
+        return name
+    # Older drafts referenced file stems; accept only a unique registered source.
+    matches = [key for key, content in documents.items()
+               if any(PurePosixPath(path).stem == name for path in re.findall(r"artifacts/[^\s<>\"'`]+?\.md", content))]
+    return matches[0] if len(matches) == 1 else None
+
+
+def readiness(conn, project_id, draft):
+    from cairn.server.development_workflow import validate_plan
+    config = store.project(conn, project_id)
+    issues = []
+    if config.phase != "design":
+        issues.append("项目已进入开发阶段")
+    if conn.execute("SELECT status FROM projects WHERE id=?", (project_id,)).fetchone()["status"] != "active":
+        issues.append("请先继续项目")
+    try:
+        ensure_idle(conn, project_id)
+    except HTTPException:
+        issues.append("请等待当前任务完成并应用结果")
+    if not draft.documents or not draft.baseline or not draft.session:
+        issues.append("尚缺方案文档、代码基线或设计会话")
+    if any(q.answer is None for q in draft.questions):
+        issues.append("请先回答所有待决问题")
+    if config.revision != config.requested_revision or draft.control_revision != config.revision:
+        issues.append("黑板指令已变化，请先让设计 Agent 核对草案")
+    try:
+        validate_plan(conn, project_id, DevelopmentOutcome(kind="plan", summary="Design readiness", work=draft.work))
+    except ValueError as exc:
+        issues.append(str(exc))
+    for task in draft.work:
+        if not task.spec_refs:
+            issues.append(f"任务 {task.key} 未引用设计文档")
+        for ref in task.spec_refs:
+            document, separator, section = ref.partition("#")
+            if document_id(draft.documents, ref) is None or separator and not section.strip():
+                issues.append(f"任务 {task.key} 的文档引用无效：{ref}（使用已登记文档 ID 或 ID#章节）")
+    author = conn.execute("SELECT r.applied FROM runs r JOIN intents i ON i.project_id=r.project_id AND i.id=r.intent_id "
+                          "WHERE r.project_id=? AND r.state='success' AND json_extract(i.work,'$.purpose')='design' "
+                          "ORDER BY r.rowid DESC LIMIT 1", (project_id,)).fetchone()
+    if not author or not author["applied"]:
+        issues.append("设计尚无已完成并应用的输出")
+    return {"ready": not issues, "issues": issues, "version": draft.version}
 
 
 @router.post("/messages", dependencies=[Depends(require_operator)], status_code=201)
@@ -263,19 +312,13 @@ def freeze(project_id: str, body: Version):
             raise HTTPException(409, "Design version or phase changed")
         if draft.candidate:
             return draft
-        ensure_idle(conn, project_id)
-        if not draft.documents or not draft.baseline or not draft.session or any(q.answer is None for q in draft.questions):
-            raise HTTPException(422, "Design needs documents, a code baseline, a session and answers to all open questions")
-        if config.revision != config.requested_revision or draft.control_revision != config.revision:
-            raise HTTPException(409, "Blackboard controls changed; reconcile the design first")
+        checks = readiness(conn, project_id, draft)
+        if not checks["ready"]:
+            raise HTTPException(422, "；".join(checks["issues"]))
+        for task in draft.work:
+            task.spec_refs = [document_id(draft.documents, ref) + ("#" + ref.partition("#")[2] if "#" in ref else "")
+                              for ref in task.spec_refs]
         outcome = DevelopmentOutcome(kind="plan", summary="User-facing design candidate", work=draft.work)
-        try:
-            validate_plan(conn, project_id, outcome)
-            for w in draft.work:
-                if not w.spec_refs or any(ref not in draft.documents for ref in w.spec_refs):
-                    raise ValueError("Each task must reference existing design document IDs")
-        except ValueError as exc:
-            raise HTTPException(422, str(exc)) from exc
         author = conn.execute("SELECT r.* FROM runs r JOIN intents i ON i.project_id=r.project_id AND i.id=r.intent_id "
                               "WHERE r.project_id=? AND r.state='success' AND json_extract(i.work,'$.purpose')='design' "
                               "ORDER BY r.rowid DESC LIMIT 1", (project_id,)).fetchone()

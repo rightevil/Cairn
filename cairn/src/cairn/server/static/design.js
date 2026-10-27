@@ -4,6 +4,12 @@ function designFeatures() {
     designEntries: [], designCursor: 0, designProject: '', designInput: '', designAnswers: {},
     designStream: null, designStreamProject: '', designSending: false, designMessageId: '', designCommandIndex: 0, designCommandOpen: true,
     designError: '', designDocument: '', designFollowPending: false, designMessageSignature: '',
+    designReadiness: { ready: false, issues: ['正在检查提交条件'], version: -1 },
+
+    canSubmitDesign() {
+      return !this.designSending && !this.designBusy() && this.designReadiness.ready
+        && this.designReadiness.version === this.designDraft.version;
+    },
 
     designBusy() {
       return (this.project?.intents || []).some(i => i.work?.purpose === 'design' && ['ready', 'running', 'implemented'].includes(i.work.state));
@@ -38,11 +44,13 @@ function designFeatures() {
         this.designStream?.abort(); this.designStream = null; this.designStreamProject = '';
         this.designProject = id; this.designEntries = []; this.designCursor = 0; this.designInput = '';
         this.designAnswers = {}; this.designMessageId = ''; this.designDocument = '';
+        this.designReadiness = { ready: false, issues: ['正在检查提交条件'], version: -1 };
       }
       try {
         const state = await this.api('GET', `/projects/${id}/development/design?after=${this.designCursor}`);
         if (this.selectedProjectId !== id) return;
         this.designDraft = state.draft;
+        this.designReadiness = state.readiness || { ready: false, issues: ['请重启 Cairn 以加载提交校验'], version: -1 };
         for (const item of state.messages) this.designReceive(item);
         this.designError = '';
         if (!this.designStream || this.designStreamProject !== id) this.startDesignStream(id);
@@ -124,7 +132,7 @@ function designFeatures() {
     },
 
     async designAction(action) {
-      if (this.designSending) return;
+      if (this.designSending || action === 'candidate' && !this.canSubmitDesign()) return;
       this.designSending = true;
       const projectId = this.selectedProjectId;
       try {

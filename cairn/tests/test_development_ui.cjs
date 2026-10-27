@@ -24,6 +24,12 @@ replay.designReceive({ id: 3, kind: 'text', data: { block: 'run:2:1', text: 'Sam
 assert.equal(replay.designEntries.length, 2, 'Identical text in a different streamed message is legitimate');
 replay.designReceive({ id: 4, kind: 'text', data: { block: 'run:2:1', text: 'Complete text', mode: 'snapshot' } });
 assert.equal(replay.designEntries[1].text, 'Complete text');
+assert.equal(app.canSubmitDesign(), false);
+app.designReadiness = { ready: true, issues: [], version: app.designDraft.version };
+assert.equal(app.canSubmitDesign(), true);
+app.designDraft.version++;
+assert.equal(app.canSubmitDesign(), false, 'A stale readiness result must not enable submission');
+assert(html.includes(':disabled="!canSubmitDesign()"') && html.includes('designReadiness.issues'));
 assert(html.includes('pendingQuestions().slice(0, 1)') && html.includes('保存并继续') && html.includes('提交本轮回答'));
 app.designDraft.commands = [{ name: 'bmad-prd' }, { name: 'bmad-architecture' }, { name: 'theme' }];
 app.designInput = '/b';

@@ -228,6 +228,36 @@ def test_agent_update_idempotence_and_version_fence(http, repository):
     assert agent(http, project, {**run, 'token': 'wrong'}, 'text', {'text': 'No access'}).status_code == 403
 
 
+def test_reference_sections_and_unique_legacy_file_ids_share_submit_readiness(http, repository):
+    project, _, _, _ = ready(http, repository)
+    from cairn.server.design import load, save
+    with db.get_conn() as conn:
+        draft = load(conn, project)
+        draft.documents['prd-file'] = 'artifacts/design/product/product.md'
+        draft.work[0].spec_refs = ['requirements#FR-1', 'product#FR-2']
+        save(conn, project, draft)
+    assert http.get(url(project), headers=OPERATOR).json()['readiness']['ready']
+    frozen = freeze(http, project)
+    assert frozen['work'][0]['spec_refs'] == ['requirements#FR-1', 'prd-file#FR-2']
+
+
+@pytest.mark.parametrize('reference', ['unknown#FR-1', 'requirements#', 'product#FR-2'])
+def test_invalid_and_ambiguous_references_are_reported_before_submission(http, repository, reference):
+    project, _, _, _ = ready(http, repository)
+    from cairn.server.design import load, save
+    with db.get_conn() as conn:
+        draft = load(conn, project)
+        draft.documents.update({'one': 'artifacts/a/product.md', 'two': 'artifacts/b/product.md'})
+        draft.work[0].spec_refs = [reference]
+        save(conn, project, draft)
+    status = http.get(url(project), headers=OPERATOR).json()['readiness']
+    assert not status['ready']
+    assert any('FEATURE-1' in issue and reference in issue for issue in status['issues'])
+    rejected = http.post(url(project, '/candidate'), headers=OPERATOR, json={'version': 1})
+    assert rejected.status_code == 422
+    assert reference in rejected.json()['detail']
+
+
 def test_free_text_answers_must_quote_new_user_input_not_agent_defaults(http, repository):
     project = create_design(http, repository)
     run = claim(http, project, send(http, project)).json()
