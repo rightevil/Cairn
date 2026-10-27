@@ -112,6 +112,32 @@ def messages(conn, project_id, after=0):
         "SELECT * FROM design_messages WHERE project_id=? AND id>? ORDER BY id LIMIT 500", (project_id, after))]
 
 
+def review_state(conn, project_id, draft):
+    from cairn.server.development_workflow import all_work
+    from cairn.server.routers.development import public_run
+    work = all_work(conn, project_id)
+    subject = draft.candidate.get("subject")
+    if not subject:
+        subject = next((iid for iid, value in reversed(work) if value.result.get("design_candidate")), None)
+    if not subject:
+        return None
+    author = next(value for iid, value in work if iid == subject)
+    reviews = [(iid, value) for iid, value in work if value.subject == subject and value.purpose == "plan"]
+    if not reviews:
+        return None
+    iid, value = reviews[-1]
+    runs = conn.execute("SELECT * FROM runs WHERE project_id=? AND intent_id=? ORDER BY rowid DESC", (project_id, iid)).fetchall()
+    run = public_run(runs[0]) if runs else None
+    output = value.result.get("output", {})
+    frozen = author.result.get("design_snapshot", {})
+    current = draft.candidate.get("subject") == subject
+    return {"subject": subject, "intent_id": iid, "version": frozen.get("version"), "stage": frozen.get("stage"),
+            "digest": author.result["design_candidate"], "current": current, "work_state": value.state,
+            "summary": draft.candidate.get("summary", "") if current else output.get("summary", ""),
+            "verdict": draft.candidate.get("review", "pending") if current else output.get("verdict"),
+            "checkpoint": value.checkpoint, "retry_at": value.retry_at, "run": run, "attempts": len(runs)}
+
+
 @router.get("", dependencies=[Depends(require_reader)])
 def state(project_id: str, after: int = 0, input_id: int | None = None):
     with get_conn() as conn:
@@ -126,6 +152,7 @@ def state(project_id: str, after: int = 0, input_id: int | None = None):
         documents, _, document_errors = resolve_documents(conn, project_id, draft)
         return {"draft": draft, "messages": history, "readiness": readiness(conn, project_id, draft),
                 "document_views": documents, "document_errors": document_errors,
+                "review": review_state(conn, project_id, draft),
                 "artifact_directory": str(Path(store.project(conn, project_id).repository) / ".cairn" / "artifacts")}
 
 

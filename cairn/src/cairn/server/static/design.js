@@ -6,6 +6,30 @@ function designFeatures() {
     designError: '', designDocument: '', designFollowPending: false, designMessageSignature: '',
     designReadiness: { ready: false, issues: ['正在检查提交条件'], version: -1 },
     designDocuments: {}, designDocumentErrors: [], designArtifactDirectory: '',
+    designReview: null,
+
+    designReviewStatus() {
+      const review = this.designReview;
+      if (!review) return '';
+      if (!review.current) return '上一轮评审 · 已归档';
+      if (review.verdict !== 'pending') return this.reviewLabel(review.verdict);
+      const run = review.run;
+      if (run?.state === 'running') {
+        if (Date.now() - Date.parse(run.heartbeat_at) > 60000) return '心跳待确认，请查看运行输出';
+        return run.checkpoint || (run.pid ? '评审 Agent 正在运行' : '正在启动评审 Agent');
+      }
+      if (review.work_state === 'waiting') return '评审等待重试／外部条件';
+      if (run?.state === 'success' && !run.applied) return '评审输出已返回，等待校验并应用';
+      if (run && run.state !== 'success') return '上次运行未完成：' + this.developmentRunStatus(run);
+      return '已排队，等待独立评审 Agent 领取';
+    },
+
+    openDesignReviewReport() {
+      const review = this.designReview;
+      if (!review?.summary) return;
+      this.developmentArtifact = { open: true, name: '独立评审报告 · v' + review.version, markdown: true,
+        text: `# 独立评审报告\n\n冻结版本：v${review.version} · ${this.stageLabel(review.stage)}\n\n评审任务：${review.intent_id}\n\n${review.summary}` };
+    },
 
     openDesignDocument(name) {
       const text = this.designDocuments[name];
@@ -63,6 +87,7 @@ function designFeatures() {
         this.designReadiness = { ready: false, issues: ['正在检查提交条件'], version: -1 };
         this.designDocuments = {}; this.designDocumentErrors = [];
         this.designArtifactDirectory = '';
+        this.designReview = null;
       }
       try {
         const state = await this.api('GET', `/projects/${id}/development/design?after=${this.designCursor}`);
@@ -71,6 +96,7 @@ function designFeatures() {
         this.designDocuments = state.document_views || {};
         this.designDocumentErrors = state.document_errors || [];
         this.designArtifactDirectory = state.artifact_directory || '';
+        this.designReview = state.review || null;
         this.designReadiness = state.readiness || { ready: false, issues: ['请重启 Cairn 以加载提交校验'], version: -1 };
         for (const item of state.messages) this.designReceive(item);
         this.designError = '';

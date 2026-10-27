@@ -376,6 +376,8 @@ class DevelopmentDispatcher:
                         draft = subject.work.result["design_snapshot"]
                         if frozen_commit != draft["baseline"]:
                             raise RuntimeError("Design baseline changed before independent review")
+                        self.call(project.project.id, f"runs/{run['id']}/heartbeat", {
+                            "token": run["token"], "checkpoint": "正在执行设计基线检查（不包含未来任务测试）"})
                         # Planned task checks belong to implementation, not the pre-code baseline.
                         commands = list(config.checks) or [["git", "diff", "--check"]]
                         passed, checks = repository.checks(worktree, commands, directory, cancellation)

@@ -171,6 +171,7 @@ def test_document_stage_can_be_reviewed_without_tasks_then_continue_without_publ
     assert draft['candidate']['kind'] == 'stage'
     payload = {'version': draft['version'], 'digest': draft['candidate']['digest']}
     assert http.post(url(project, '/continue'), headers=OPERATOR, json=payload).status_code == 409
+
     review(http, project, draft)
     assert http.post(url(project, '/publish'), headers=OPERATOR, json=payload).status_code == 409
     response = http.post(url(project, '/continue'), headers=OPERATOR, json=payload)
@@ -184,6 +185,28 @@ def test_document_stage_can_be_reviewed_without_tasks_then_continue_without_publ
     assert not any(i['work']['role'] == 'implementer' for i in project_state['intents'])
     assert sum(i['work']['purpose'] == 'design' and i['work']['state'] == 'ready' for i in project_state['intents']) == 1
     assert http.post(url(project, '/continue'), headers=OPERATOR, json=payload).status_code == 409
+
+
+def test_review_progress_exposes_real_run_and_preserves_the_report_after_reopening(http, repository):
+    project, _, _, _ = ready(http, repository)
+    frozen = freeze(http, project)
+    status = http.get(url(project), headers=OPERATOR).json()['review']
+    assert status['current'] and status['version'] == frozen['version']
+    assert status['run'] is None and status['verdict'] == 'pending'
+    run = claim(http, project, status['intent_id'], role='architect', worker='independent').json()
+    current = http.get(url(project), headers=OPERATOR).json()['review']
+    assert current['run']['id'] == run['id'] and current['attempts'] == 1
+    assert 'token_hash' not in current['run'] and run['token'] not in str(current)
+    response = http.post(f"/projects/{project}/development/runs/{run['id']}/heartbeat", headers=WORKER,
+        json={'token': run['token'], 'checkpoint': '正在执行设计基线检查'})
+    assert response.status_code == 200
+    assert http.get(url(project), headers=OPERATOR).json()['review']['run']['checkpoint'] == '正在执行设计基线检查'
+    finish(http, project, run, {'kind': 'review', 'summary': 'Fix the parallel write conflict', 'verdict': 'request_changes'}, session='independent')
+    result = http.get(url(project), headers=OPERATOR).json()['review']
+    assert result['verdict'] == 'request_changes' and result['summary'] == 'Fix the parallel write conflict'
+    assert http.post(url(project, '/reopen'), headers=OPERATOR, json={'version': frozen['version']}).status_code == 200
+    archived = http.get(url(project), headers=OPERATOR).json()['review']
+    assert not archived['current'] and archived['summary'] == result['summary']
 
 
 @pytest.mark.parametrize('mutation', ['baseline', 'dirty', 'controls'])
