@@ -38,6 +38,35 @@ def claim(http, project, intent, worker="writer", role="planner", revision=1):
                      json={"worker": worker, "role": role, "revision": revision, "host": "local-test"})
 
 
+def test_delete_project_requires_operator_and_stopped_agents_and_preserves_files(http, tmp_path):
+    project, intent = create(http, tmp_path)
+    marker = tmp_path / "keep.txt"
+    marker.write_text("user source", encoding="utf-8")
+    run = claim(http, project, intent).json()
+    assert http.delete(f"/projects/{project}").status_code == 401
+    assert http.delete(f"/projects/{project}", headers=OPERATOR).status_code == 409
+    assert http.get(f"/projects/{project}").status_code == 200
+    assert http.post(f"/projects/{project}/development/runs/{run['id']}/finish", headers=WORKER,
+                     json={"token": run["token"], "outcome": "cancelled"}).status_code == 200
+    with db.get_conn() as conn:
+        conn.execute("INSERT INTO operations(project_id,key,run_id,kind,request,updated_at) VALUES(?,?,?,?,?,?)",
+                     (project, "operation", run["id"], "local", "{}", "2026-01-01T00:00:00Z"))
+        conn.execute("INSERT INTO designs(project_id,data) VALUES(?,?)", (project, "{}"))
+        mid = conn.execute("INSERT INTO design_messages(project_id,key,kind,data,created_at) VALUES(?,?,?,?,?)",
+                           (project, "message", "user", "{}", "2026-01-01T00:00:00Z")).lastrowid
+        conn.execute("INSERT INTO design_inputs(message_id,project_id,intent_id) VALUES(?,?,?)", (mid, project, intent))
+        store.event(conn, project, "test", intent, "history")
+    assert http.delete(f"/projects/{project}", headers=OPERATOR).status_code == 204
+    assert http.get(f"/projects/{project}").status_code == 404
+    with db.get_conn() as conn:
+        for table in ("facts", "intents", "hints", "runs", "operations", "development_events", "designs", "design_messages", "design_inputs"):
+            assert conn.execute(f"SELECT count(*) FROM {table} WHERE project_id=?", (project,)).fetchone()[0] == 0
+        assert not conn.execute("PRAGMA foreign_key_check").fetchall()
+    assert marker.read_text(encoding="utf-8") == "user source"
+    new_project, _ = create(http, tmp_path)
+    assert new_project != project
+
+
 def test_local_browser_session_is_origin_bound_and_cannot_authorize_workers(http):
     with TestClient(app, base_url="http://127.0.0.1:8765", client=("127.0.0.1", 5000)) as browser:
         assert browser.get("/workspace/projects").status_code == 401

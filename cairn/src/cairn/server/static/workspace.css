@@ -23,3 +23,7 @@
 @media(max-width:950px){.design-panel{position:static;width:330px;box-shadow:none}.design-history{padding:20px}.composer{padding:12px}.rail{width:180px}}
 @media(max-width:760px){.design-panel{position:absolute;width:min(90vw,520px);right:0;top:83px;bottom:0;box-shadow:-8px 0 25px #20392a18}.session-tree{padding:0}.session-item{padding:7px 3px}.session-item span{font-size:10px}.rail{width:150px}}
 @media(max-width:650px){.rail{width:62px}.session-item span{display:none}.session-item{justify-content:center}.design-panel{top:72px;width:calc(100vw - 62px)}.session-tree{padding:0}.handoff-bar{max-height:38vh}}
+/* Project deletion is a separate control, never nested in the open button. */
+.project-card-wrap { min-width: 0; }
+.project-card-wrap > .project-card { width: 100%; }
+.project-delete { display: block; margin: 6px 0 0 auto; }

@@ -25,6 +25,7 @@ from cairn.server.services import (
     check_project_completed,
     check_project_active,
     clear_project_reason,
+    delete_project_records,
     expire_reason_leases,
     expire_workers,
     get_completion_intent_or_409,
@@ -159,8 +160,9 @@ def delete_project(project_id: str, request: Request):
         if get_project_or_404(auth_conn, project_id)["development"]:
             require_operator(request)
     with get_conn() as conn:
-        get_project_or_404(conn, project_id)
-        conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+        # Serialize the running-work check with dispatcher claims.
+        conn.execute("BEGIN IMMEDIATE")
+        delete_project_records(conn, project_id)
 
 
 @router.put("/projects/{project_id}/title", response_model=ProjectMeta)

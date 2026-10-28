@@ -241,3 +241,28 @@ const transcript=context.agentOutput([
 ].join('\n'));
 assert.equal(transcript.length,1);
 assert.equal(transcript[0].text,'## Finding');
+
+(async () => {
+  const deletion = context.cairnApp();
+  const calls = [];
+  deletion.api = async (...args) => { calls.push(args); };
+  deletion.loadProjects = async () => {};
+  deletion.showToast = () => {};
+  deletion.requestDeleteProject({id:'project-to-remove', title:'Example'});
+  deletion.deleteConfirmation = 'another name';
+  await deletion.deleteProject();
+  assert.equal(calls.length, 0, 'Deletion requires the exact project name');
+  deletion.deleteConfirmation = 'Example';
+  await deletion.deleteProject();
+  assert.equal(calls[0][0], 'DELETE');
+  assert.equal(calls[0][1], '/projects/project-to-remove');
+  assert.equal(deletion.deleteTarget, null);
+  deletion.requestDeleteProject({id:'busy-project', title:'Busy'});
+  deletion.deleteConfirmation = 'Busy';
+  deletion.api = async () => { throw new Error('Agent still running'); };
+  await deletion.deleteProject();
+  assert.equal(deletion.deleteTarget.id, 'busy-project', 'A rejected deletion keeps its confirmation dialog');
+  assert.equal(deletion.deleteError, 'Agent still running');
+  assert.equal(deletion.deletingProject, false);
+  assert(html.includes('输入项目名称以确认') && html.includes('requestDeleteProject(p)'));
+})().catch(error => { console.error(error); process.exitCode = 1; });

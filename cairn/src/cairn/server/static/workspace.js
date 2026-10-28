@@ -12,12 +12,13 @@ function cairnApp() {
     folderError: '', folderSearch: '', folderRequest: 0,
     newFolderVisible: false, newFolderName: '', newFolderError: '', folderCreating: false,
     newProject: { name: '', directory: '' }, createError: '',
+    deleteTarget: null, deleteConfirmation: '', deletingProject: false, deleteError: '',
     toast: '', toastType: 'info', toastTimer: null,
     fileSuggestions: [], fileIndex: 0, fileTimer: null,
 
     async init() {
       const returnFocus = new Map();
-      for (const field of ['showNewProject', 'developmentArtifact.open', 'folderOpen']) this.$watch(field, open => {
+      for (const field of ['showNewProject', 'developmentArtifact.open', 'folderOpen', 'deleteTarget']) this.$watch(field, open => {
         if (open) {
           returnFocus.set(field, document.activeElement);
           this.$nextTick(() => {
@@ -86,6 +87,24 @@ function cairnApp() {
 
     filteredProjects() {
       return this.projects.filter(p => p.title.toLowerCase().includes(this.projectSearch.toLowerCase()));
+    },
+
+    requestDeleteProject(project) {
+      this.deleteTarget = { id: project.id, title: project.title };
+      this.deleteConfirmation = ''; this.deleteError = '';
+    },
+
+    async deleteProject() {
+      const target = this.deleteTarget;
+      if (!target || this.deletingProject || this.deleteConfirmation !== target.title) return;
+      this.deletingProject = true; this.deleteError = '';
+      try {
+        await this.api('DELETE', `/projects/${encodeURIComponent(target.id)}`);
+        if (this.selectedProjectId === target.id) { this.backToList(); location.hash = ''; }
+        this.deleteTarget = null;
+        await this.loadProjects(); this.showToast('项目记录已删除，磁盘文件已保留');
+      } catch (error) { this.deleteError = error.message; }
+      finally { this.deletingProject = false; }
     },
 
     async route() {

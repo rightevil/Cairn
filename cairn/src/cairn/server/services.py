@@ -12,6 +12,17 @@ def utcnow() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def delete_project_records(conn: sqlite3.Connection, project_id: str) -> None:
+    """Remove protocol history only; the operator owns files on disk."""
+    project = get_project_or_404(conn, project_id)
+    if (conn.execute("SELECT 1 FROM runs WHERE project_id=? AND state='running'", (project_id,)).fetchone()
+            or project["reason_worker"]
+            or conn.execute("SELECT 1 FROM intents WHERE project_id=? AND worker IS NOT NULL AND concluded_at IS NULL",
+                            (project_id,)).fetchone()):
+        raise HTTPException(409, "请先暂停项目，并等待正在运行的 Agent 退出后再删除")
+    conn.execute("DELETE FROM projects WHERE id=?", (project_id,))
+
+
 def next_project_id(conn: sqlite3.Connection) -> str:
     conn.execute("UPDATE counters SET value = value + 1 WHERE name = 'project'")
     row = conn.execute("SELECT value FROM counters WHERE name = 'project'").fetchone()
