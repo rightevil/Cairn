@@ -7,6 +7,7 @@ function developmentFeatures() {
     developmentControl: { kind: 'suggestion', content: '', scope: '', replaces: '' },
     controlSending: false,
     developmentArtifact: { open: false, name: '', text: '' },
+    taskActivity: { intent: '', runs: [], next: null }, taskActivityLoading: false, taskActivityRequest: 0,
 
     async loadDevelopment(id) {
       this.developmentNow = Date.now();
@@ -20,6 +21,11 @@ function developmentFeatures() {
         if (this.selectedProjectId !== id) return;
         const selected = this.selectedAgentSession();
         this.developmentState = result;
+        if (this.developmentArtifact.conversation && this.developmentArtifact.projectId === id) {
+          const latest = result.runs.find(r => r.id === this.developmentArtifact.run.id);
+          if (latest) this.developmentArtifact.run = latest;
+          await this.refreshTaskRun();
+        }
         if (selected && !this.selectedAgentSession()) {
           this.agentSessionKey = (result.sessions || []).find(s => s.runs.some(r => selected.runs.some(old => old.id === r.id)))?.key || '';
         }
@@ -41,6 +47,57 @@ function developmentFeatures() {
 
     runningDevelopmentRuns() {
       return this.developmentState.runs.filter(run => run.state === 'running');
+    },
+
+    runTask(run) {
+      const seen = new Set(); let id = run.intent_id;
+      while (id && !seen.has(id)) {
+        seen.add(id);
+        const intent = this.project?.intents?.find(i => i.id === id);
+        if (intent?.work?.role === 'implementer') return {id, key:intent.work.key, title:intent.description};
+        id = intent?.work?.subject;
+      }
+      return null;
+    },
+
+    async loadTaskActivity(id, more = false) {
+      const projectId = this.selectedProjectId;
+      const request = ++this.taskActivityRequest;
+      this.taskActivityLoading = true;
+      try {
+        const suffix = more && this.taskActivity.next ? `?before=${this.taskActivity.next}` : '';
+        const result = await this.api('GET', `/projects/${projectId}/development/intents/${id}/activity${suffix}`);
+        if (this.selectedProjectId !== projectId || this.selection?.id !== id || this.taskActivityRequest !== request) return;
+        this.taskActivity = {intent:id, runs:more ? [...this.taskActivity.runs,...result.runs] : result.runs, next:result.next};
+      } catch (e) { if (this.selectedProjectId === projectId && this.taskActivityRequest === request) this.developmentError = e.message; }
+      finally { if (this.taskActivityRequest === request) this.taskActivityLoading = false; }
+    },
+
+    async openTaskRun(run) {
+      const task = this.runTask(run);
+      this.developmentArtifact = {open:true, conversation:true, projectId:this.selectedProjectId, run,
+        name:(task?.key || '项目级活动')+' / '+this.developmentRole(run.role,run), text:''};
+      await this.refreshTaskRun();
+    },
+
+    async refreshTaskRun() {
+      const preview = this.developmentArtifact;
+      if (!preview.open || !preview.conversation || preview.loading || preview.finished) return;
+      preview.loading = true;
+      try {
+        const response = await fetch(`/projects/${preview.projectId}/development/runs/${preview.run.id}/stream/stdout`);
+        if (!response.ok) throw new Error('运行记录尚未可用');
+        const text = await response.text();
+        if (this.developmentArtifact !== preview || this.selectedProjectId !== preview.projectId) return;
+        preview.text = text;
+        preview.error = '';
+        preview.finished = preview.run.state !== 'running';
+      } catch (e) { preview.error = e.message; }
+      finally { preview.loading = false; }
+    },
+
+    taskRunEntries() {
+      return agentOutput(this.developmentArtifact.text || '').map(entry => ({...entry,id:this.developmentArtifact.run.id+':'+entry.id}));
     },
 
     developmentTime(timestamp) {

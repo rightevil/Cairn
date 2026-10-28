@@ -67,6 +67,29 @@ def test_delete_project_requires_operator_and_stopped_agents_and_preserves_files
     assert new_project != project
 
 
+def test_task_activity_collects_nested_review_history_with_pagination_and_no_unrelated_runs(http, tmp_path):
+    project, _ = create(http, tmp_path)
+    with db.get_conn() as conn:
+        root = store.add_intent(conn, project, "Build API", WorkPackage(role="implementer", key="api", revision=1))
+        review = store.add_intent(conn, project, "Inspect API", WorkPackage(role="reviewer", subject=root, revision=1))
+        arbitration = store.add_intent(conn, project, "Resolve finding", WorkPackage(role="architect", purpose="arbitration", subject=review, revision=1))
+        other = store.add_intent(conn, project, "Project direction", WorkPackage(role="architect", purpose="direction", revision=1))
+        for name, intent, role in [("implementation",root,"implementer"),("review",review,"reviewer"),("arbitration",arbitration,"architect")]+[(f"unrelated-{i}",other,"architect") for i in range(110)]:
+            conn.execute("INSERT INTO runs(id,project_id,intent_id,worker,role,revision,token_hash,host,state,started_at,heartbeat_at,finished_at) VALUES(?,?,?,?,?,1,?,?,'success',?,?,?)",
+                         (name,project,intent,"worker",role,"not-public","local-test",*("2026-01-01T00:00:00Z",)*3))
+    endpoint = f"/projects/{project}/development/intents/{review}/activity"
+    assert http.get(endpoint).status_code == 401
+    page = http.get(endpoint+'?limit=2', headers=OPERATOR).json()
+    assert page["task"]["id"] == root and page["task"]["key"] == "api"
+    assert [r["id"] for r in page["runs"]] == ["arbitration","review"]
+    assert page["next"] is not None
+    earlier = http.get(endpoint+f'?limit=2&before={page["next"]}',headers=OPERATOR).json()
+    assert [r["id"] for r in earlier["runs"]] == ["implementation"]
+    assert earlier["next"] is None
+    assert "not-public" not in str(page)
+    assert http.get(endpoint+'?limit=101', headers=OPERATOR).status_code == 422
+
+
 def test_local_browser_session_is_origin_bound_and_cannot_authorize_workers(http):
     with TestClient(app, base_url="http://127.0.0.1:8765", client=("127.0.0.1", 5000)) as browser:
         assert browser.get("/workspace/projects").status_code == 401

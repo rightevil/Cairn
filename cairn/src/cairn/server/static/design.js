@@ -11,18 +11,20 @@ function designFeatures() {
 
     toolHTML(entry) { return agentToolHTML(entry, this.toolOpen[entry.id]); },
 
-    projectSessions() { return this.developmentState.sessions || []; },
-    selectedAgentSession() { return this.projectSessions().find(s => s.key === this.agentSessionKey && !s.main) || null; },
+    allAgentSessions() { return this.developmentState.sessions || []; },
+    projectSessions() { return this.allAgentSessions().filter(s => s.main || s.runs.some(r => r.design_conversation)); },
+    selectedAgentSession() { return this.allAgentSessions().find(s => s.key === this.agentSessionKey && !s.main) || null; },
     selectAgentSession(key) {
-      const session = this.projectSessions().find(s => s.key === key);
+      const session = this.allAgentSessions().find(s => s.key === key);
       this.agentSessionKey = session?.main ? '' : key;
       this.agentError = '';
       if (session?.main) this.setStage('design');
       else this.loadAgentConversation();
     },
     selectRunSession(run) {
-      const session = this.projectSessions().find(s => s.runs.some(r => r.id === run.id));
-      if (session) this.selectAgentSession(session.key);
+      const session = this.allAgentSessions().find(s => s.runs.some(r => r.id === run.id));
+      if (session?.runs.find(r => r.id === run.id)?.design_conversation) this.selectAgentSession(session.key);
+      else this.openTaskRun(run);
     },
     agentEntries() {
       const session = this.selectedAgentSession();

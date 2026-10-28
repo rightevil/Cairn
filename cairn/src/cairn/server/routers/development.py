@@ -8,7 +8,7 @@ import hashlib
 import os
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 
 from cairn.server.access import require_operator, require_reader, require_worker, token_hash
@@ -143,6 +143,28 @@ def intent_runs(project_id: str, intent_id: str):
         store.work(conn, project_id, intent_id)
         return [public_run(r) for r in conn.execute(
             "SELECT * FROM runs WHERE project_id=? AND intent_id=? ORDER BY rowid DESC", (project_id, intent_id))]
+
+
+@router.get("/intents/{intent_id}/activity", dependencies=[Depends(require_reader)])
+def task_activity(project_id: str, intent_id: str, before: int | None = None, limit: int = Query(30, ge=1, le=100)):
+    from cairn.server.agent_sessions import task_records, task_identity
+    with get_conn() as conn:
+        store.work(conn, project_id, intent_id)
+        records = task_records(conn, project_id)
+        task = task_identity(records, intent_id)
+        ids = [i for i in records if task_identity(records, i) == task] if task else [intent_id]
+        marks = ",".join("?" for _ in ids)
+        rows = conn.execute(f"SELECT rowid AS cursor,* FROM runs WHERE project_id=? AND intent_id IN ({marks}) "
+                            "AND (? IS NULL OR rowid<?) ORDER BY rowid DESC LIMIT ?",
+                            (project_id, *ids, before, before, limit+1)).fetchall()
+        output = []
+        for row in rows[:limit]:
+            value = public_run(row)
+            item = {k:value[k] for k in ("id","intent_id","worker","role","state","started_at","finished_at",
+                                         "heartbeat_at","pid","checkpoint","detail","streams","evidence")}
+            item["verdict"] = value["result"].get("output", {}).get("verdict")
+            output.append(item)
+        return {"task":task, "runs":output, "next":rows[limit-1]["cursor"] if len(rows)>limit else None}
 
 
 @router.get("/runs/{run_id}/evidence/{index}", dependencies=[Depends(require_reader)])

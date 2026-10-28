@@ -279,10 +279,18 @@ function cairnApp() {
       }
     },
 
-    selectItem(kind, id) { this.selection = { kind, id }; this.panelOpen = true; },
+    selectItem(kind, id) {
+      this.selection = { kind, id }; this.panelOpen = true;
+      this.taskActivity = {intent:id, runs:[], next:null};
+      if (kind === 'intent' && this.project?.project?.development) this.loadTaskActivity(id);
+    },
     selectedIntent() { return this.selection?.kind === 'intent' ? this.project?.intents.find(i => i.id === this.selection.id) : null; },
     selectedFact() { return this.selection?.kind === 'fact' ? this.project?.facts.find(f => f.id === this.selection.id) : null; },
-    selectedRuns() { return this.developmentState.runs.filter(r => r.intent_id === this.selectedIntent()?.id); },
+    selectedRuns() {
+      if (this.taskActivity.intent === this.selectedIntent()?.id && this.taskActivity.runs.length) return this.taskActivity.runs;
+      const id = this.selectedIntent()?.id;
+      return this.developmentState.runs.filter(r => (this.runTask(r)?.id || r.intent_id) === id);
+    },
     async resumeDevelopment() {
       try {
         await this.api('PUT', `/projects/${this.selectedProjectId}/status`, { status: 'active' });

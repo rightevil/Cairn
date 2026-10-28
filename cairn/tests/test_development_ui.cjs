@@ -269,7 +269,33 @@ board.project.intents.push({id:'c',description:'New task',from:[],work:{key:'C',
 board.updateGraph();assert.equal(layouts,1);assert.equal(zoom,.65);assert.equal(pan.y,45);
 vm.runInContext('workspaceGraph=null',context);
 
+const taskView=context.cairnApp();
+taskView.project={intents:[
+ {id:'implementation',description:'Playable integration',work:{role:'implementer',key:'integrate'}},
+ {id:'review',description:'Independent review',work:{role:'reviewer',subject:'implementation'}},
+ {id:'arbitration',description:'Resolve finding',work:{role:'architect',subject:'review'}},
+ {id:'direction',description:'Project direction',work:{role:'architect',purpose:'direction'}},
+]};
+assert.equal(taskView.runTask({intent_id:'arbitration'}).key,'integrate');
+assert.equal(taskView.runTask({intent_id:'direction'}),null);
+taskView.developmentState.sessions=[
+ {key:'main',main:true,runs:[]},
+ {key:'design-review',main:false,runs:[{id:'design-run',design_conversation:true}]},
+ {key:'implementation',main:false,runs:[{id:'work-run',design_conversation:false}]},
+];
+assert.equal(taskView.projectSessions().length,2,'Development sessions live in task details, not the project sidebar');
+
 (async () => {
+  const historyView=context.cairnApp();
+  historyView.selectedProjectId='project';historyView.selection={kind:'intent',id:'a'};
+  const pending={};historyView.api=async (method,url)=>new Promise(resolve=>{pending[url.includes('/a/')?'a':'b']=resolve;});
+  const first=historyView.loadTaskActivity('a');
+  historyView.selection={kind:'intent',id:'b'};
+  const second=historyView.loadTaskActivity('b');
+  pending.b({runs:[{id:'new'}],next:null});await second;
+  pending.a({runs:[{id:'old'}],next:null});await first;
+  assert.equal(historyView.taskActivity.intent,'b','A late activity response must not replace another task');
+  assert.equal(historyView.taskActivity.runs[0].id,'new');
   const deletion = context.cairnApp();
   const calls = [];
   deletion.api = async (...args) => { calls.push(args); };
