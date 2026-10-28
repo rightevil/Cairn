@@ -222,18 +222,32 @@ class DevelopmentDispatcher:
             for r in self.call(project.project.id, f"intents/{intent.id}/runs") if r["id"] != run["id"]
             and r["state"] != "running"]
         atomic_json(directory / "attempt-history.json", attempts)
+        project_view = project.project.model_dump(mode="json")
+        accepted_design = project_view["development"].pop("design")
+        goal = next(f.description for f in project.facts if f.id == "goal")
+        previous = attempts[0] if attempts else None
+        resume_from = next((a["progress_path"] for a in attempts if Path(a["progress_path"]).is_file()), None)
+        related = set(intent.work.dependencies)
+        if subject:
+            related.update(subject.work.dependencies)
+        fields = ("key", "role", "state", "purpose", "scope", "acceptance", "checks", "dependencies", "head_commit", "merge_commit")
         context = {
-            "project": project.project.model_dump(mode="json"),
-            "goal": next(f.description for f in project.facts if f.id == "goal"),
+            "project": project_view,
+            "goal": goal,
+            "accepted_design": {"ref": "goal"} if accepted_design == goal else {"text": accepted_design},
             "work_package": {"id": intent.id, "description": intent.description, **intent.work.model_dump(mode="json")},
             "retry_feedback": feedback,
             "attempt_history_path": str(directory / "attempt-history.json"),
+            "previous_attempt": {k: previous[k] for k in ("run_id", "state", "revision")} | {
+                "detail": previous["detail"][-1200:]} if previous else None,
+            "resume_progress_path": resume_from,
             "progress_path": str(directory / "progress.json"),
             "current_controls": hints,
             "control_status": {h.id: {field: getattr(h.control, field) for field in
                 ("kind", "state", "revision", "scope", "replaces")} for h in project.hints if h.control},
             "raw_evidence": evidence,
             "work_index_path": str(directory / "work-index.json"),
+            "dependency_work": {k: {field: known[k][field] for field in fields} for k in related if k in known},
             "recent_work": {k: {field: v[field] for field in (
                 "key", "role", "state", "revision", "design_revision", "purpose", "subject",
                 "dependencies", "resources", "head_commit", "merge_commit")}

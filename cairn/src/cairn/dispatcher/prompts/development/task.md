@@ -3,6 +3,9 @@
 Read the full current context at {context_path}. It is the authoritative current
 project/work-package snapshot, including current control revisions, accepted design,
 scope, dependencies, acceptance, raw evidence paths, prior failures and decisions.
+accepted_design is the approved design: its text is supplied once, or its ref names
+goal when those texts are identical. project.development omits that duplicate text.
+The original goal and the accepted design can differ; preserve both in that case.
 The execution metadata names this run's actual role, CLI, tier, requested model alias,
 platform and owned directories. These are separate concepts; a CLI brand is not model
 identity. Read project AGENTS.md/CLAUDE.md explicitly from this checkout before work.
@@ -54,7 +57,13 @@ or changed fact; converting a decision to a review does not require a new invest
 Return a corrected result for the normal independent review; do not ask the user to
 fix a schema or dependency error that the supplied context lets you resolve.
 
-Read attempt_history_path before retrying. Previous exit causes, check reports, logs
+Start a retry with previous_attempt and resume_progress_path, when supplied. Reconcile
+saved changes and the next unfinished step with the current worktree before acting;
+an upstream request failure does not invalidate already completed implementation.
+Read the specific matching run in attempt_history_path when more evidence is needed,
+not every historical report by default. dependency_work supplies immediate dependency
+contracts; expand work_index_path only for a concrete missing ID or decision.
+Previous exit causes, check reports, logs
 and progress files are evidence to reconcile with the actual worktree, not proof of
 completion. Read any existing supervisor_handoff_path before reopening full logs;
 it summarizes evidence, not new authority over approved scope or current controls.

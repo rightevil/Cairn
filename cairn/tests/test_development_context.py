@@ -68,6 +68,9 @@ def test_attempt_history_survives_project_run_list_pagination(http, tmp_path, cu
         "error": "Prior validation error", "output": {"summary": "Prior candidate"}}
     dispatcher = DevelopmentDispatcher(SimpleNamespace(client=client,
         config=SimpleNamespace(local=LocalConfig(workspace_root=str(tmp_path / "data")))))
+    saved_progress = dispatcher.directory / project_id / "runs" / previous["id"] / "progress.json"
+    saved_progress.parent.mkdir(parents=True)
+    saved_progress.write_text('{"next_step":"Continue existing edits"}', encoding="utf-8")
     state = client.development(project_id).data
     state["runs"] = []  # Other packages' runs have displaced this task from the project window.
     worker = WorkerConfig(name="strong", type="claudecode", tier="strong", roles=["planner"], max_running=1, priority=0)
@@ -78,8 +81,35 @@ def test_attempt_history_survives_project_run_list_pagination(http, tmp_path, cu
     assert history[0]["revision"] == 1
     assert history[0]["result"]["next_step"] == "Repair the targeted check"
     assert history[0]["detail"] == "Preserved diagnosis"
+    assert context["resume_progress_path"] == str(saved_progress)
+    assert context["previous_attempt"]["run_id"] == previous["id"]
     assert "token" not in history[0]
     if current_revision == 1:
         assert context["retry_feedback"]["error"] == "Prior validation error"
     else:
         assert context["retry_feedback"] is None
+
+
+@pytest.mark.parametrize("same_design", [True, False])
+def test_authoritative_design_is_not_duplicated_and_distinct_goal_survives(http, tmp_path, same_design):
+    project_id, planner = create(http, tmp_path)
+    approved = "Accepted requirement " * 3000
+    goal = approved if same_design else "Original project goal"
+    with db.get_conn() as conn:
+        config = store.project(conn, project_id)
+        config.design = approved
+        store.save_project(conn, project_id, config)
+        conn.execute("UPDATE facts SET description=? WHERE project_id=? AND id='goal'", (goal, project_id))
+    client = Client(http)
+    project = client.get_project(project_id)
+    intent = next(i for i in project.intents if i.id == planner)
+    dispatcher = DevelopmentDispatcher(SimpleNamespace(client=client,
+        config=SimpleNamespace(local=LocalConfig(workspace_root=str(tmp_path / "data")))))
+    worker = WorkerConfig(name="strong", type="claudecode", tier="strong", roles=["planner"], max_running=1, priority=0)
+    path = dispatcher.context(project, intent, client.development(project_id).data,
+                              tmp_path / "context", {"id":"new"}, tmp_path, worker)
+    context = json.loads(path.read_text(encoding="utf-8"))
+    assert "design" not in context["project"]["development"]
+    assert context["goal"] == goal
+    assert context["accepted_design"] == ({"ref":"goal"} if same_design else {"text":approved})
+    assert path.read_text(encoding="utf-8").count(approved) == 1
