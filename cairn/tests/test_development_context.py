@@ -68,7 +68,7 @@ def test_attempt_history_survives_project_run_list_pagination(http, tmp_path, cu
         "error": "Prior validation error", "output": {"summary": "Prior candidate"}}
     dispatcher = DevelopmentDispatcher(SimpleNamespace(client=client,
         config=SimpleNamespace(local=LocalConfig(workspace_root=str(tmp_path / "data")))))
-    saved_progress = dispatcher.directory / project_id / "runs" / previous["id"] / "progress.json"
+    saved_progress = tmp_path / ".cairn" / "workspaces" / project_id / "runs" / previous["id"] / "progress.json"
     saved_progress.parent.mkdir(parents=True)
     saved_progress.write_text('{"next_step":"Continue existing edits"}', encoding="utf-8")
     state = client.development(project_id).data

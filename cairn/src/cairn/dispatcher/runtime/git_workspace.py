@@ -46,6 +46,14 @@ def file_artifact(path: Path, kind="log", **metadata) -> Evidence:
     return Evidence(kind=kind, path=str(path.resolve()), sha256=digest, **metadata)
 
 
+def ignore_project_metadata(repository: Path):
+    exclude = Path(git(repository, "rev-parse", "--path-format=absolute", "--git-path", "info/exclude"))
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    existing = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
+    if "/.cairn/" not in existing.splitlines():
+        exclude.write_text(existing.rstrip() + "\n/.cairn/\n", encoding="utf-8")
+
+
 class GitWorkspace:
     def __init__(self, config: DevelopmentProject, directory: Path, project_id: str):
         self.config = config
@@ -55,7 +63,10 @@ class GitWorkspace:
         top = Path(git(self.repository, "rev-parse", "--show-toplevel")).resolve()
         if top != self.repository:
             raise GitError("Configure the repository root, not a subdirectory")
-        self.directory = directory.resolve() / project_id
+        from cairn.workspace import project_workspace
+        self.directory = project_workspace(config, project_id, directory)
+        if config.workspace_root:
+            ignore_project_metadata(self.repository)
         self.directory.mkdir(parents=True, exist_ok=True)
         self.branch = config.integration_branch or git(self.repository, "symbolic-ref", "--quiet", "--short", "HEAD")
         git(self.repository, "check-ref-format", "--branch", self.branch)

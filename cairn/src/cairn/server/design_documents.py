@@ -15,8 +15,11 @@ def source_paths(content):
 
 
 def artifact_roots(conn, project_id):
-    repository = Path(store.project(conn, project_id).repository)
-    roots = []
+    from cairn.workspace import project_workspace
+    config = store.project(conn, project_id)
+    repository = Path(config.repository)
+    roots = ([project_workspace(config, project_id, repository / ".cairn" / "workspaces") / "design-session" / "artifacts"]
+             if config.workspace_root else [])
     for row in conn.execute("SELECT id,streams FROM runs WHERE project_id=? ORDER BY rowid DESC", (project_id,)):
         value = json.loads(row["streams"]).get("stdout")
         if not value:

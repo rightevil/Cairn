@@ -11,6 +11,7 @@ from cairn.dispatcher.design_skills import BMAD_SKILLS, prepare, run_script
 from cairn.dispatcher.runtime.git_workspace import git
 from cairn.dispatcher.runtime.design_artifacts import export_artifacts
 from cairn.server.development_models import PlannedWork
+from cairn.workspace import project_workspace
 
 
 def tool_path_allowed(workspace: Path, snapshot: Path, tool: str, inputs: dict):
@@ -33,7 +34,7 @@ async def run_turn(dispatcher, project, intent, worker, run, directory, snapshot
     from cairn.dispatcher.development import executable_argv
 
     pid = project.project.id
-    workspace = dispatcher.directory / pid / "design-session"
+    workspace = project_workspace(project.project.development, pid, dispatcher.directory) / "design-session"
     workspace.mkdir(parents=True, exist_ok=True)
     await asyncio.to_thread(prepare, workspace, dispatcher.config.design)
     repository = Path(project.project.development.repository)

@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 import tempfile
 
-from cairn.dispatcher.runtime.git_workspace import git
+from cairn.dispatcher.runtime.git_workspace import ignore_project_metadata
 
 
 def export_artifacts(source: Path, repository: Path):
@@ -35,11 +35,7 @@ def export_artifacts(source: Path, repository: Path):
         contents[target] = content
         hashes[relative] = checksum
     # Local design metadata must not make an otherwise clean code baseline dirty.
-    exclude = Path(git(repository, "rev-parse", "--path-format=absolute", "--git-path", "info/exclude"))
-    exclude.parent.mkdir(parents=True, exist_ok=True)
-    existing = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
-    if "/.cairn/" not in existing.splitlines():
-        exclude.write_text(existing.rstrip() + "\n/.cairn/\n", encoding="utf-8")
+    ignore_project_metadata(repository)
     contents[manifest] = json.dumps(hashes, ensure_ascii=False, indent=2).encode("utf-8")
     for target, content in contents.items():
         target.parent.mkdir(parents=True, exist_ok=True)

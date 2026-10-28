@@ -20,6 +20,7 @@ from cairn.dispatcher.runtime.git_workspace import GitWorkspace, IntegrationWait
 from cairn.dispatcher.runtime.process_identity import process_identity, stop_owned_process
 from cairn.dispatcher.workers.registry import get_driver
 from cairn.server.development_models import DevelopmentOutcome, DevelopmentProject, EFFECTIVE_CONTROL_STATES
+from cairn.workspace import project_workspace
 
 LOG = logging.getLogger(__name__)
 
@@ -78,7 +79,7 @@ class DevelopmentDispatcher:
         for run in state["runs"]:
             if run["id"] in self.owned:
                 continue
-            directory = self.directory / project.project.id / "runs" / run["id"]
+            directory = project_workspace(project.project.development, project.project.id, self.directory) / "runs" / run["id"]
             pending = directory / "finish.json"
             if pending.exists() and not (directory / "delivered").exists():
                 result = self.client.development(project.project.id, f"runs/{run['id']}/finish", json.loads(pending.read_text(encoding="utf-8")))
@@ -198,7 +199,8 @@ class DevelopmentDispatcher:
         evidence = [e for r in source_runs for e in r["evidence"]]
         for item in evidence:
             path = Path(item["path"]).resolve()
-            if not path.is_relative_to(self.directory) or not path.is_file() or file_artifact(path).sha256 != item["sha256"]:
+            roots = (project_workspace(project.project.development, project.project.id, self.directory), self.directory / project.project.id)
+            if not any(path.is_relative_to(root) for root in roots) or not path.is_file() or file_artifact(path).sha256 != item["sha256"]:
                 raise RuntimeError("Source evidence is missing, outside the data directory, or has changed")
         hints = [{"id": h.id, "content": h.content, "control": h.control.model_dump(mode="json")}
                  for h in project.hints if h.control and h.control.state in EFFECTIVE_CONTROL_STATES]
@@ -217,8 +219,8 @@ class DevelopmentDispatcher:
             feedback = None
         attempts = [{"run_id": r["id"], "revision": r["revision"], "state": r["state"], "detail": r["detail"],
             "result": r["result"], "evidence": r["evidence"],
-            "progress_path": str(self.directory / project.project.id / "runs" / r["id"] / "progress.json"),
-            "supervisor_handoff_path": str(self.directory / project.project.id / "runs" / r["id"] / "supervisor-handoff.json")}
+            "progress_path": str(project_workspace(project.project.development, project.project.id, self.directory) / "runs" / r["id"] / "progress.json"),
+            "supervisor_handoff_path": str(project_workspace(project.project.development, project.project.id, self.directory) / "runs" / r["id"] / "supervisor-handoff.json")}
             for r in self.call(project.project.id, f"intents/{intent.id}/runs") if r["id"] != run["id"]
             and r["state"] != "running"]
         atomic_json(directory / "attempt-history.json", attempts)
@@ -266,7 +268,7 @@ class DevelopmentDispatcher:
         return directory / "context.json"
 
     def execute(self, project, intent, worker, run, cancellation):
-        directory = self.directory / project.project.id / "runs" / run["id"]
+        directory = project_workspace(project.project.development, project.project.id, self.directory) / "runs" / run["id"]
         directory.mkdir(parents=True, exist_ok=True)
         atomic_json(directory / "run.json", {"id": run["id"], "token": run["token"], "intent_id": intent.id})
         checkpoint = directory / "checkpoint.json"

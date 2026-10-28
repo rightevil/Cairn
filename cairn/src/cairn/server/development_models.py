@@ -34,6 +34,7 @@ class DevelopmentModel(BaseModel):
 class DevelopmentProject(DevelopmentModel):
     phase: Literal["design", "execution"] = "execution"
     repository: str = Field(min_length=1)
+    workspace_root: str | None = None
     integration_branch: str = ""
     remote: str = "origin"
     delivery: Literal["github", "local"] = "github"

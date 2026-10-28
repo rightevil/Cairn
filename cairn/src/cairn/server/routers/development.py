@@ -95,7 +95,13 @@ def initialize(conn, project_id: str, config: DevelopmentProject) -> None:
     if not Path(config.repository).is_absolute():
         raise HTTPException(422, "Repository must be an absolute path on the dispatcher host")
     config = config.model_copy(update={"revision": 1, "requested_revision": 1, "state": "active",
-                                       "wait_reason": "", "wake_at": None})
+                                       "wait_reason": "", "wake_at": None,
+                                       "workspace_root": str(Path(config.repository) / ".cairn" / "workspaces")})
+    from cairn.workspace import project_workspace
+    try:
+        project_workspace(config, project_id, Path(config.repository))
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
     store.save_project(conn, project_id, config)
     conn.execute("UPDATE projects SET bootstrap_enabled = 0 WHERE id = ?", (project_id,))
     if config.phase == "execution":

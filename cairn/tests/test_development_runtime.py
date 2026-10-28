@@ -60,6 +60,24 @@ def test_checks_record_real_failure_instead_of_accepting_worker_claim(repository
     assert len(reports) == 1 and reports[0]["exit_code"] == 7 and not reports[0]["passed"]
 
 
+def test_new_project_storage_is_in_selected_repository_and_metadata_is_ignored(repository, tmp_path):
+    config = DevelopmentProject(repository=str(repository), design="Approved design",
+                                workspace_root=str(repository / ".cairn" / "workspaces"))
+    manager = GitWorkspace(config, tmp_path / "legacy", "project")
+    owned = manager.feature("task", WorkPackage(revision=1))
+    path = Path(owned["worktree"])
+    assert path.is_relative_to(repository / ".cairn" / "workspaces")
+    snapshot = manager.snapshot("review")
+    assert snapshot.is_relative_to(repository / ".cairn" / "workspaces")
+    (path / "feature.txt").write_text("implementation", encoding="utf-8")
+    head = manager.commit_implementation(path, "task")
+    assert git(path, "show", f"{head}:feature.txt") == "implementation"
+    assert not git(repository, "status", "--porcelain")
+    assert not (tmp_path / "legacy" / "project").exists()
+    with pytest.raises(ValueError, match="inside its repository"):
+        GitWorkspace(config.model_copy(update={"workspace_root":str(tmp_path / "outside")}), tmp_path, "project")
+
+
 def test_wrapper_refuses_to_commit_if_worker_switches_its_owned_branch(repository, tmp_path):
     manager = GitWorkspace(DevelopmentProject(repository=str(repository), design="Build application"), tmp_path / "data", "proj_001")
     owned = manager.feature("i001", WorkPackage(revision=1))
@@ -375,7 +393,7 @@ print(json.dumps({"type":"result","result":json.dumps({"kind":"''' + kind + '''"
     if role == "implementer":
         assert "changed tracked code" not in result["detail"]
         assert any(Path(item["path"]).name == "progress.json" for item in result["evidence"])
-        worktree = tmp_path / "data" / project_id / "worktrees" / intent_id
+        worktree = repository / ".cairn" / "workspaces" / project_id / "worktrees" / intent_id
         assert (worktree / "README.md").read_text() == "Uncommitted implementation checkpoint"
         assert git(worktree, "rev-parse", "HEAD") == git(repository, "rev-parse", "HEAD")
         advance(http, project_id)
@@ -462,7 +480,7 @@ print(json.dumps({"type":"result","session_id":os.environ["CAIRN_RUN_ID"],"resul
     if check_fails:
         fail_flag.touch()
     run, outcome = execute(review, role)
-    artifact_dir = tmp_path / "data" / project_id / "runs" / run["id"]
+    artifact_dir = repository / ".cairn" / "workspaces" / project_id / "runs" / run["id"]
     checks_required = verdict == "approve" and within_scope
     assert (artifact_dir / "acceptance-ran").exists() == checks_required
     assert (artifact_dir / "check-summary.json").exists() == checks_required
