@@ -242,6 +242,33 @@ const transcript=context.agentOutput([
 assert.equal(transcript.length,1);
 assert.equal(transcript[0].text,'## Finding');
 
+const board = context.cairnApp();
+board.project={facts:[{id:'origin',description:'base'},{id:'goal',description:'goal'},{id:'old-fact',description:'history'}],intents:[
+  {id:'a',description:'First task',from:['origin'],work:{key:'A',role:'implementer',state:'running',dependencies:[]}},
+  {id:'b',description:'Second task',from:[],work:{key:'B',role:'implementer',state:'ready',dependencies:['a']}},
+  {id:'audit',description:'Archived review',from:[],work:{role:'reviewer',state:'verified',dependencies:[]}},
+]};
+let graphElements=board.graphElements();
+assert(!graphElements.some(e=>e.data.id==='f:old-fact'||e.data.id==='i:audit'));
+assert(graphElements.some(e=>e.data.source==='i:a'&&e.data.target==='i:b'&&e.data.type==='dependency'));
+assert(board.graphStateLabel(board.project.intents[1]).includes('依赖等待'));
+board.taskFilter='waiting';
+assert.equal(board.visibleWork().length,1);
+board.taskFilter='all';board.graphHistory=true;
+assert(board.graphElements().some(e=>e.data.id==='f:old-fact'));
+let layouts=0,zoom=.65,pan={x:120,y:45};
+graphElements=board.graphElements();
+context.testGraph={resize(){},json(value){if(value){graphElements=value.elements;return;}return {elements:{nodes:graphElements.filter(e=>!e.data.source),edges:graphElements.filter(e=>e.data.source)}};},
+  layout(){return {run(){layouts++;}};},zoom(value){if(value!==undefined)zoom=value;return zoom;},pan(value){if(value!==undefined)pan=value;return pan;}};
+vm.runInContext('workspaceGraph=testGraph',context);
+board.view='graph';board.sideTab='development';board.$refs={blackboard:{clientWidth:800}};board.$nextTick=fn=>fn();
+board.project.intents[0].work.state='verified';board.updateGraph();
+assert.equal(layouts,0,'Status polling must not rearrange an unchanged topology');
+assert.equal(zoom,.65);assert.equal(pan.x,120);
+board.project.intents.push({id:'c',description:'New task',from:[],work:{key:'C',role:'implementer',state:'ready',dependencies:[]}});
+board.updateGraph();assert.equal(layouts,1);assert.equal(zoom,.65);assert.equal(pan.y,45);
+vm.runInContext('workspaceGraph=null',context);
+
 (async () => {
   const deletion = context.cairnApp();
   const calls = [];

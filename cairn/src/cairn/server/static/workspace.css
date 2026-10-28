@@ -39,3 +39,12 @@
 .project-card-wrap { min-width: 0; }
 .project-card-wrap > .project-card { width: 100%; }
 .project-delete { display: block; margin: 6px 0 0 auto; }
+:root { --font-body: Inter, "Microsoft YaHei", system-ui, sans-serif; --graph-paper: #fffaf4; --graph-ink: #29303a; --graph-muted: #9c9a9b; --graph-cool: #596896; --graph-accent: #b6573e; --graph-ok: #387261; --graph-bad: #ab3f47; }
+.graph-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.graph-tools select { width: auto; min-width: 110px; }
+.board .legend { flex-wrap: wrap; position: static; padding: 10px 16px; }
+.graph-state { border: 1px solid var(--graph-muted); padding: 2px 6px; border-radius: 4px; }
+.graph-state.running { border-width: 3px; border-color: var(--graph-accent); color: var(--graph-accent); }
+.graph-state.review { border-color: var(--graph-cool); color: var(--graph-cool); }
+.graph-state.verified { border-color: var(--graph-ok); color: var(--graph-ok); }
+.graph-state.waiting { border-style: double; border-width: 3px; border-color: var(--graph-bad); color: var(--graph-bad); }

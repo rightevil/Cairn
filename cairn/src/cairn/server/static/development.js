@@ -30,7 +30,13 @@ function developmentFeatures() {
     },
 
     developmentWork() {
-      return (this.project?.intents || []).filter(intent => intent.work).slice().reverse();
+      return (this.project?.intents || []).filter(intent => intent.work && intent.work.purpose !== 'design' && intent.work.state !== 'superseded').slice().reverse();
+    },
+
+    visibleWork() {
+      return this.developmentWork().filter(i => this.taskFilter === 'active' ? ['running','implemented','reviewing','approved','merged'].includes(i.work.state)
+        : this.taskFilter === 'waiting' ? i.work.state === 'waiting' || i.work.state === 'ready' && (i.work.dependencies || []).some(id => this.project.intents.find(d => d.id === id)?.work?.state !== 'verified')
+        : this.taskFilter === 'verified' ? i.work.state === 'verified' : true);
     },
 
     runningDevelopmentRuns() {
