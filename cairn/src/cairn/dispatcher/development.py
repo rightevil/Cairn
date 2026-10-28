@@ -19,7 +19,7 @@ from cairn.dispatcher.runtime.cancellation import TaskCancellation
 from cairn.dispatcher.runtime.git_workspace import GitWorkspace, IntegrationWait, file_artifact, git, write_artifact
 from cairn.dispatcher.runtime.process_identity import process_identity, stop_owned_process
 from cairn.dispatcher.workers.registry import get_driver
-from cairn.server.development_models import DevelopmentOutcome, DevelopmentProject, EFFECTIVE_CONTROL_STATES
+from cairn.server.development_models import DevelopmentOutcome, DevelopmentProject, EFFECTIVE_CONTROL_STATES, Evidence
 from cairn.workspace import project_workspace
 
 LOG = logging.getLogger(__name__)
@@ -355,13 +355,21 @@ class DevelopmentDispatcher:
                     run_worker.env["CAIRN_SYSTEM_PROMPT_FILE"] = artifact.path
                 frozen_review = intent.work.purpose == "plan" and any(
                     i.id == intent.work.subject and i.work and i.work.result.get("design_candidate") for i in project.intents)
-                if frozen_review:
-                    from cairn.dispatcher.frozen_review import run_review
+                bounded_review = (worker.type == "claudecode" and intent.work.role in ("reviewer", "architect")
+                    and intent.work.purpose in ("implementation", "milestone")
+                    and (not worker.command or len(worker.command) == 1 or Path(worker.command[0]).stem.lower() in ("claude", "claude-code")))
+                if frozen_review or bounded_review:
+                    from cairn.dispatcher.frozen_review import run_review, ReviewChecks
                     from types import SimpleNamespace
-                    response, session = asyncio.run(asyncio.wait_for(run_review(self, project, worker, run, directory,
-                        worktree, prompt, context_path, cancellation), self.config.tasks.development_timeout))
+                    subject = next((i for i in project.intents if i.id == intent.work.subject), None)
+                    commands = repository.check_commands(subject.work) if bounded_review and subject else []
+                    checks = ReviewChecks(repository, worktree, commands, directory, cancellation) if bounded_review else None
+                    response, session = asyncio.run(asyncio.wait_for(run_review(self, project, run_worker, run, directory,
+                        worktree, prompt, context_path, cancellation, checks=checks), self.config.tasks.development_timeout))
                     result = SimpleNamespace(stdout=response, stderr="", returncode=0, timed_out=False, cancelled=False)
                     evidence.extend(file_artifact(path, kind="artifact") for path in (directory / "reports").rglob("*") if path.is_file())
+                    if checks:
+                        evidence.extend(Evidence.model_validate(item) for check in checks.results.values() for item in check["evidence"])
                 else:
                     argv = executable_argv(run_worker, driver.build_execute(run_worker, prompt, session).argv)
                     env = {**run_worker.env, "CAIRN_CONTEXT_PATH": str(context_path), "CAIRN_CHECKPOINT_PATH": str(checkpoint),

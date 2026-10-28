@@ -151,8 +151,12 @@ def test_actual_claude_invokes_skills_and_persists_question(repository, tmp_path
     assert calls and any('mcp__cairn__ask_questions' in tools for tools in calls)
 
 
-def test_actual_review_cli_denies_source_edits_but_can_write_own_report(repository,tmp_path):
-    from cairn.dispatcher.frozen_review import run_review
+@pytest.mark.parametrize("bounded", [False, True])
+def test_actual_review_cli_denies_source_edits_but_can_write_own_report(repository,tmp_path,bounded):
+    from cairn.dispatcher.frozen_review import run_review, ReviewChecks
+    from cairn.dispatcher.runtime.git_workspace import GitWorkspace
+    from cairn.server.development_models import DevelopmentProject
+    import sys
     run_dir=tmp_path/'review-run'; run_dir.mkdir()
     context=run_dir/'context.json'; context.write_text('{}')
     original=(repository/'README.md').read_bytes()
@@ -168,6 +172,8 @@ def test_actual_review_cli_denies_source_edits_but_can_write_own_report(reposito
             index=len(requests); requests.append(body)
             tools=[('Write',{'file_path':str(repository/'README.md'),'content':'Unauthorized overwrite'}),
                    ('Write',{'file_path':str(report),'content':'# Independent findings'})]
+            if bounded:
+                tools += [('mcp__cairn_review__run_check', {'index':0}), ('mcp__cairn_review__run_check', {'index':0})]
             chosen=tools[index] if index<len(tools) else None
             result=json.dumps({'kind':'review','verdict':'request_changes','summary':'Independent findings recorded'})
             block={'type':'tool_use','id':f'tool_{index}','name':chosen[0],'input':{}} if chosen else {'type':'text','text':''}
@@ -186,12 +192,18 @@ def test_actual_review_cli_denies_source_edits_but_can_write_own_report(reposito
              'ANTHROPIC_MODEL':'claude-sonnet-4-6','CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC':'1','HTTP_PROXY':'','HTTPS_PROXY':'','ALL_PROXY':'','NO_PROXY':'127.0.0.1,localhost'})
     dispatcher=SimpleNamespace(call=lambda *args: {})
     project=SimpleNamespace(project=SimpleNamespace(id='test',development=SimpleNamespace(repository=str(repository))))
+    checks = ReviewChecks(GitWorkspace(DevelopmentProject(repository=str(repository),design='Review implementation'),tmp_path/'data','test'),
+        repository, [[sys.executable,'-c',"import os;from pathlib import Path;p=Path(os.environ['CAIRN_ARTIFACT_DIR'])/'count';p.write_text(p.read_text()+'x' if p.exists() else 'x')"]], run_dir, TaskCancellation()) if bounded else None
     try:
         result,session=asyncio.run(asyncio.wait_for(run_review(dispatcher,project,worker,{'id':'review-run','token':'local'},run_dir,repository,
-            'Read the context and report findings as JSON: '+str(context),context,TaskCancellation()),40))
+            'Read the context and report findings as JSON: '+str(context),context,TaskCancellation(),checks=checks),40))
     finally:
         server.shutdown();server.server_close();thread.join(timeout=3)
     assert json.loads(result)['verdict']=='request_changes' and session
     assert (repository/'README.md').read_bytes()==original
     assert report.read_text()=='# Independent findings'
     assert all('Bash' not in [t['name'] for t in body['tools']] for body in requests)
+    if bounded:
+        assert (run_dir/'review-check-0'/'count').read_text() == 'x'
+        assert len(checks.results) == 1
+        assert any('"reused": true' in json.dumps(body) .replace('\\"','"') for body in requests)

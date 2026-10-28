@@ -78,6 +78,21 @@ def test_new_project_storage_is_in_selected_repository_and_metadata_is_ignored(r
         GitWorkspace(config.model_copy(update={"workspace_root":str(tmp_path / "outside")}), tmp_path, "project")
 
 
+def test_review_reuses_exact_check_result_and_rejects_undeclared_commands(repository, tmp_path):
+    from cairn.dispatcher.frozen_review import ReviewChecks
+    manager = GitWorkspace(DevelopmentProject(repository=str(repository), design="Inspect candidate"), tmp_path / "data", "project")
+    argv = [sys.executable, "-c", "print('verified')"]
+    checks = ReviewChecks(manager, repository, [argv, argv], tmp_path / "reports", TaskCancellation())
+    first = checks.run(0)
+    second = checks.run(0)
+    assert first["passed"] and not first["reused"] and second["reused"]
+    assert first["evidence"] == second["evidence"]
+    assert first["evidence"][0]["command"] == argv
+    assert first["evidence"][0]["exit_code"] == 0
+    with pytest.raises(ValueError, match="Unknown declared"):
+        checks.run(1)
+
+
 def test_wrapper_refuses_to_commit_if_worker_switches_its_owned_branch(repository, tmp_path):
     manager = GitWorkspace(DevelopmentProject(repository=str(repository), design="Build application"), tmp_path / "data", "proj_001")
     owned = manager.feature("i001", WorkPackage(revision=1))
