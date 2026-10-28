@@ -62,6 +62,35 @@ def test_stable_work_key_prevents_duplicate_completed_work(http, tmp_path):
     assert len([w for w in works(http, project).values() if w["role"] == "implementer"]) == 2
 
 
+def test_infrastructure_failures_preserve_work_and_do_not_escalate_design(http, tmp_path):
+    project, planner = create(http, tmp_path)
+    approve_plan(http, project, planner)
+    subject = next(i for i,w in works(http, project).items() if w["key"] == "api")
+    with db.get_conn() as conn:
+        value = store.work(conn, project, subject)
+        value.failures = 2
+        value.result["saved_progress"] = "continue existing edits"
+        value.worktree = str(tmp_path / "owned-worktree")
+        store.save_work(conn, project, subject, value)
+    for _ in range(4):
+        run = claim(http, project, subject, role="implementer").json()
+        response = http.post(f"/projects/{project}/development/runs/{run['id']}/finish", headers=WORKER,
+            json={"token":run["token"], "outcome":"infrastructure", "detail":"API Error: 502 getaddrinfo ENOTFOUND gateway.example.org",
+                  "retry_at":"2000-01-01T00:00:00Z"})
+        assert response.status_code == 200, response.text
+        advance(http, project)
+        values = works(http, project)
+        assert values[subject]["failures"] == 2
+        assert values[subject]["result"]["saved_progress"] == "continue existing edits"
+        assert values[subject]["worktree"] == str(tmp_path / "owned-worktree")
+        assert not any(w["purpose"] == "arbitration" for w in values.values())
+    run = claim(http, project, subject, role="implementer").json()
+    http.post(f"/projects/{project}/development/runs/{run['id']}/finish", headers=WORKER,
+              json={"token":run["token"], "outcome":"failed", "detail":"Implementation checks failed"})
+    advance(http, project)
+    assert any(w["purpose"] == "arbitration" for w in works(http, project).values())
+
+
 def test_direction_change_reuses_interrupted_arbitration(http, tmp_path):
     from cairn.server.development_workflow import all_work, request_design
     project, planner = create(http, tmp_path)

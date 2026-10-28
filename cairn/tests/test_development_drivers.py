@@ -119,6 +119,32 @@ def test_real_capacity_reset_information_is_used_without_a_project_budget():
     assert capacity_retry_at("unknown reset time") is None
 
 
+@pytest.mark.parametrize("error,expected", [
+    ("API Error: 502 getaddrinfo ENOTFOUND account.example.org", "infrastructure"),
+    ("API Error: 503 upstream unavailable", "infrastructure"),
+    ("API Error: 401 unauthorized", "infrastructure"),
+    ("API Error: 429 rate limited Retry-After: 60", "capacity"),
+    ("Implementation checks failed", "failed"),
+])
+def test_failure_classification_uses_actual_error_not_log_counters(error, expected):
+    from cairn.dispatcher.development import classify_failure
+    stream = "\n".join(json.dumps(event) for event in [
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "Historical quota exceeded"}]}},
+        {"type": "user", "message": {"content": [{"type": "tool_result", "content": "HTTP 429 from a fixture"}]}},
+        {"type": "result", "is_error": True, "result": error, "duration_ms": 1429},
+    ])
+    outcome, detail = classify_failure(stream + "\n")
+    assert outcome == expected
+    assert detail == error
+
+
+def test_valid_response_and_usage_digits_cannot_be_classified_as_capacity():
+    from cairn.dispatcher.development import classify_failure
+    stream = json.dumps({"type": "result", "is_error": False, "duration_ms": 429,
+                         "result": "Historical API Error: 502 and quota exceeded", "usage": {"input_tokens": 429}})
+    assert classify_failure(stream + "\n")[0] == "failed"
+
+
 def test_development_example_loads_both_tiers_from_magpie_environment(monkeypatch):
     from cairn.dispatcher.config import DispatchConfig
     for key, value in {"MAGPIE_ANTHROPIC_BASE_URL": "http://127.0.0.1:9999", "MAGPIE_API_KEY": "test-only",

@@ -164,7 +164,7 @@ function cairnApp() {
     },
     statusLabel(status) {
       return { active: '进行中', stopped: '已暂停', completed: '已完成', running: '运行中', success: '成功',
-        failed: '失败', cancelled: '已取消', capacity: '等待额度', blocked: '等待条件', recovered: '已回收',
+        failed: '失败', cancelled: '已取消', capacity: '等待额度', infrastructure: '推理请求失败，保留进度', blocked: '等待条件', recovered: '已回收',
         superseded: '已替代', unknown: '待核对', done: '已完成', absent: '确认不存在', ready: '待执行',
         proposed: '已提议', implemented: '已实现', reviewing: '待审查', approved: '已批准', merged: '已合并',
         verified: '已验证', rejected: '未通过', waiting: '等待条件' }[status] || status;

@@ -18,6 +18,43 @@ from test_development_runtime import repository
 pytestmark = pytest.mark.skipif(os.environ.get('CAIRN_NATIVE_CLAUDE_TEST') != '1', reason='Opt-in native Claude integration')
 
 
+def test_actual_claude_does_not_multiply_gateway_retries(repository):
+    import subprocess
+    from cairn.dispatcher.development import executable_argv, classify_failure
+    from cairn.dispatcher.workers.adapters.claudecode import ClaudeCodeDriver
+
+    calls = []
+    class FailedGateway(BaseHTTPRequestHandler):
+        def log_message(self, *args): pass
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get('Content-Length', 0)))
+            if 'count_tokens' in self.path:
+                code, payload = 200, {'input_tokens': 10}
+            else:
+                calls.append(self.path)
+                code, payload = 502, {'type':'error','error':{'type':'api_error','message':'getaddrinfo ENOTFOUND upstream.example.org'}}
+            body = json.dumps(payload).encode()
+            self.send_response(code); self.send_header('Content-Type','application/json')
+            self.send_header('Content-Length',str(len(body))); self.end_headers(); self.wfile.write(body)
+
+    server = ThreadingHTTPServer(('127.0.0.1', 0), FailedGateway)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    role = WorkerConfig(name='native-retry-test', type='claudecode', roles=['implementer'], max_running=1, priority=0,
+        env={'ANTHROPIC_BASE_URL':f'http://127.0.0.1:{server.server_port}', 'ANTHROPIC_AUTH_TOKEN':'local-test-only',
+             'ANTHROPIC_API_KEY':'', 'ANTHROPIC_MODEL':'claude-sonnet-4-6', 'CLAUDE_CODE_MAX_RETRIES':'0',
+             'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC':'1','HTTP_PROXY':'','HTTPS_PROXY':'','ALL_PROXY':'',
+             'NO_PROXY':'127.0.0.1,localhost'})
+    driver = ClaudeCodeDriver()
+    try:
+        argv = executable_argv(role, driver.build_execute(role, 'Return a result.', driver.prepare_session()).argv)
+        process = subprocess.run(argv, cwd=repository, env={**os.environ, **role.env}, capture_output=True,
+                                 text=True, encoding='utf-8', errors='replace', timeout=30)
+        assert len(calls) == 1 and calls[0].split('?', 1)[0] == '/v1/messages', f'Unexpected gateway requests: {calls}'
+        assert classify_failure(process.stdout+'\n'+process.stderr)[0] == 'infrastructure'
+    finally:
+        server.shutdown(); server.server_close()
+
+
 @pytest.mark.parametrize("guidance_phase", ["tool", "text", "boundary"])
 def test_actual_claude_invokes_skills_and_persists_question(repository, tmp_path, guidance_phase):
     calls, events = [], []

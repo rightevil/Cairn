@@ -331,6 +331,8 @@ class DevelopmentDispatcher:
                 session = driver.prepare_session()
                 run_worker = worker.model_copy(deep=True)
                 if worker.type == "claudecode":
+                    # Magpie owns upstream failover; avoid multiplying its retries in this CLI.
+                    run_worker.env.setdefault("CLAUDE_CODE_MAX_RETRIES", os.environ.get("CLAUDE_CODE_MAX_RETRIES", "0"))
                     system = resources.files("cairn.dispatcher.prompts").joinpath("development", "system.md").read_text(encoding="utf-8")
                     artifact = write_artifact(directory, "system-prompt.md", system, kind="artifact")
                     evidence.append(artifact)
@@ -452,6 +454,8 @@ class DevelopmentDispatcher:
                 outcome = "cancelled"
             if outcome == "capacity":
                 retry_at = retry_at or capacity_retry_at(detail) or _after(60)
+            elif outcome == "infrastructure":
+                retry_at = retry_at or _after(30)
             if outcome != "success":
                 diagnostic = detail
                 for key, value in (worker.env.items() if worker else ()):
@@ -474,10 +478,43 @@ class DevelopmentDispatcher:
 
 
 def classify_failure(detail):
-    lowered = detail.lower()
-    if any(marker in lowered for marker in ("429", "rate limit", "quota", "capacity", "usage limit")):
-        return "capacity", detail[-2000:]
-    return "failed", detail[-2000:]
+    import re
+
+    errors, plain = [], []
+    try:
+        whole = json.loads(detail)
+        lines = [whole] if isinstance(whole, dict) else []
+    except ValueError:
+        lines = []
+        for line in detail.splitlines():
+            try:
+                event = json.loads(line)
+            except ValueError:
+                if line.strip():
+                    plain.append(line)
+                continue
+            if isinstance(event, dict):
+                lines.append(event)
+    for event in lines:
+        if event.get("type") == "result" and event.get("is_error"):
+            errors.append(str(event.get("result") or event.get("errors") or ""))
+        elif event.get("isApiErrorMessage"):
+            content = (event.get("message") or {}).get("content", [])
+            errors.extend(block.get("text", "") for block in content if isinstance(block, dict))
+        elif event.get("type") == "error":
+            errors.append(str(event.get("error", "")))
+    # Tool output, usage counters and historical assistant prose are not API errors.
+    message = "\n".join(errors or plain) or detail[-2000:]
+    if not errors and lines and not plain:
+        return "failed", "CLI exited without an explicit API error; inspect the recorded logs"
+    status = re.search(r'(?:\bAPI Error:\s*|\bHTTP\s*|\bstatus(?:_code| code)?[\s:=]+|^)([45]\d{2})\b', message, re.I)
+    code = int(status[1]) if status else None
+    if code == 429 or re.search(r'\b(?:rate limit(?:ed)?|quota exceeded|usage limit reached)\b', message, re.I):
+        return "capacity", message[-2000:]
+    if (code in (401, 403, 408, 500, 502, 503, 504, 529)
+            or re.search(r'\b(?:ENOTFOUND|EAI_AGAIN|ECONNRESET|ECONNREFUSED|ETIMEDOUT)\b|connection (?:error|failed)|network error', message, re.I)):
+        return "infrastructure", message[-2000:]
+    return "failed", message[-2000:]
 
 
 def capacity_retry_at(detail):

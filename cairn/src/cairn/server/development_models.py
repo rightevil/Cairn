@@ -153,7 +153,7 @@ class Evidence(DevelopmentModel):
 
 
 class RunFinish(RunUpdate):
-    outcome: Literal["success", "failed", "cancelled", "capacity", "blocked"]
+    outcome: Literal["success", "failed", "cancelled", "capacity", "infrastructure", "blocked"]
     result: dict[str, Any] = Field(default_factory=dict)
     evidence: list[Evidence] = Field(default_factory=list)
     detail: str = ""
