@@ -349,7 +349,7 @@ def heartbeat(project_id: str, run_id: str, body: RunUpdate):
                      (utcnow(), body.session, body.pid, body.process_identity, body.checkpoint, run_id))
         conn.execute("UPDATE intents SET last_heartbeat_at=? WHERE project_id=? AND id=?", (utcnow(), project_id, row["intent_id"]))
         if body.streams:
-            if any(key not in ("stdout", "stderr") or Path(path).resolve().parent.name != run_id
+            if any(key not in ("stdout", "stderr", "terminal") or Path(path).resolve().parent.name != run_id
                    for key, path in body.streams.items()):
                 raise HTTPException(422, "Streams must be in their owned run directory")
             conn.execute("UPDATE runs SET streams=? WHERE id=?", (store.dump(body.streams), run_id))

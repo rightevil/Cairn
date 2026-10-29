@@ -261,7 +261,7 @@ def test_independent_design_runtime_checks_baseline_without_running_future_tests
     iid = next(i['id'] for i in work if i['work']['role'] == 'architect')
     run = claim(http, project, iid, role='architect').json()
     from cairn.dispatcher import frozen_review
-    async def controlled_review(dispatcher, project, worker, run, directory, *args):
+    async def controlled_review(dispatcher, project, worker, run, directory, *args, **kwargs):
         (directory / 'reports').mkdir()
         (directory / 'stdout.log').write_text('Independent review output')
         (directory / 'stderr.log').write_text('')
@@ -569,6 +569,7 @@ def test_actual_session_groups_do_not_merge_agents_by_worker_name(http, reposito
     data=http.get(f'/projects/{project}/development',headers=OPERATOR).json()
     assert len(data['sessions']) == 2
     assert sum(s['main'] for s in data['sessions']) == 1
+    assert data['sessions'][0]['main'] and data['sessions'][0]['runs']
     assert {s['session'] for s in data['sessions']} == {'author','independent'}
 
 

@@ -35,6 +35,13 @@ async function refresh() {
     element('title').textContent = run.worker + ' / ' + run.role;
     element('status').textContent = run.state;
     element('meta').textContent = `${run.intent_id} / PID ${run.pid || '准备中'} / 会话 ${run.session || '准备中'} / 心跳 ${run.heartbeat_at}`;
+    if (run.streams?.terminal) {
+      element('native-terminal').hidden=false;
+      element('channel').hidden=element('raw').parentElement.hidden=true;
+      element('conversation').hidden=element('output').hidden=true;
+      mountDesignTerminal(element('native-terminal'),projectId,run,()=>{});
+      return;
+    }
     const channel = element('channel').value;
     const text = run.streams?.[channel] ? await (await get(`${base}/stream/${channel}`)).text() : (run.detail || run.checkpoint || '等待启动输出…');
     const nearBottom = window.scrollY + window.innerHeight >= document.body.scrollHeight - 80;

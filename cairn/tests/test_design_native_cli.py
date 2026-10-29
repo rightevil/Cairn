@@ -55,102 +55,6 @@ def test_actual_claude_does_not_multiply_gateway_retries(repository):
         server.shutdown(); server.server_close()
 
 
-@pytest.mark.parametrize("guidance_phase", ["tool", "text", "boundary"])
-def test_actual_claude_invokes_skills_and_persists_question(repository, tmp_path, guidance_phase):
-    calls, events = [], []
-    guidance = {"available":False, "delivered":False, "observed":False}
-    responses = [('Skill', {'skill': 'cairn-design'}), ('Skill', {'skill': 'bmad-product-brief'}),
-                 ('Skill', {'skill': 'grilling'}), ('mcp__cairn__ask_questions', {'questions': [
-                     {'id': 'Q1', 'text': 'Who is the first user?', 'recommendation': 'Internal team', 'options': ['Internal team', 'External users']}]} )]
-
-    class Model(BaseHTTPRequestHandler):
-        def log_message(self, *args):
-            pass
-        def do_POST(self):
-            body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
-            if 'count_tokens' in self.path:
-                data = b'{"input_tokens":100}'
-                self.send_response(200); self.send_header('Content-Type', 'application/json'); self.send_header('Content-Length', str(len(data))); self.end_headers(); self.wfile.write(data)
-                return
-            if 'LOCAL_GUIDANCE' in json.dumps(body): guidance['observed'] = True
-            index = len(calls)
-            calls.append([tool['name'] for tool in body.get('tools', [])])
-            tool = responses[index] if index < len(responses) else None
-            message = {'id': f'msg_{index}', 'type': 'message', 'role': 'assistant', 'model': body.get('model'), 'content': [],
-                       'stop_reason': None, 'stop_sequence': None, 'usage': {'input_tokens': 100, 'output_tokens': 0}}
-            block = {'type': 'tool_use', 'id': f'tool_{index}', 'name': tool[0], 'input': {}} if tool else {'type': 'text', 'text': ''}
-            frames = [('message_start', {'type': 'message_start', 'message': message}),
-                      ('content_block_start', {'type': 'content_block_start', 'index': 0, 'content_block': block}),
-                      ('content_block_delta', {'type': 'content_block_delta', 'index': 0, 'delta':
-                          {'type': 'input_json_delta', 'partial_json': json.dumps(tool[1])} if tool else {'type': 'text_delta', 'text': 'Please answer the saved question.'}}),
-                      ('content_block_stop', {'type': 'content_block_stop', 'index': 0}),
-                      ('message_delta', {'type': 'message_delta', 'delta': {'stop_reason': 'tool_use' if tool else 'end_turn', 'stop_sequence': None}, 'usage': {'output_tokens': 20}}),
-                      ('message_stop', {'type': 'message_stop'})]
-            data = ''.join('event: ' + kind + '\ndata: ' + json.dumps(payload) + '\n\n' for kind, payload in frames).encode()
-            self.send_response(200); self.send_header('Content-Type', 'text/event-stream'); self.send_header('Content-Length', str(len(data))); self.end_headers()
-            if guidance_phase == 'text' and index == len(responses):
-                split = data.index(b'event: content_block_stop')
-                self.wfile.write(data[:split]); self.wfile.flush()
-                guidance['available'] = True
-                time.sleep(.5)
-                self.wfile.write(data[split:])
-            else:
-                self.wfile.write(data)
-
-    server = ThreadingHTTPServer(('127.0.0.1', 0), Model)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    worker = WorkerConfig(name='native-test', type='claudecode', tier='strong', roles=['planner'], max_running=1, priority=0,
-        env={'ANTHROPIC_BASE_URL': f'http://127.0.0.1:{server.server_port}', 'ANTHROPIC_AUTH_TOKEN': 'local-test-only',
-             'ANTHROPIC_API_KEY': '', 'ANTHROPIC_MODEL': 'claude-sonnet-4-6', 'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC': '1',
-             'HTTP_PROXY': '', 'HTTPS_PROXY': '', 'ALL_PROXY': '', 'NO_PROXY': '127.0.0.1,localhost'})
-    saved_session = [None]
-    current_input = [1]
-    def call(pid, action, payload=None):
-        if action.startswith('design?'):
-            return {'draft': {'session': saved_session[0], 'baseline': '', 'version': 0}, 'messages': [
-                {'id': current_input[0], 'kind': 'user', 'data': {'content': 'Help design a feature' if current_input[0] == 1 else 'The first user is the internal team', 'answers': {}}}]}
-        if action.endswith('/inputs'):
-            if current_input[0] == 1 and not guidance['delivered'] and (
-                    payload['action'] == 'take' and guidance['available'] or payload['action'] == 'close' and guidance_phase == 'boundary'):
-                guidance['delivered'] = True
-                return {'items':[{'id':20,'data':{'content':'LOCAL_GUIDANCE: preserve the agreed scope'}}], 'closed':False}
-            return {'items': [], 'closed': payload['action'] == 'close'}
-        if guidance_phase == 'tool' and payload.get('kind') == 'questions' and current_input[0] == 1:
-            guidance['available'] = True
-            time.sleep(.5)
-        events.append((action, payload))
-        return {'version': 1}
-    dispatcher = SimpleNamespace(directory=tmp_path, config=SimpleNamespace(design=DesignConfig(
-        bmad_repository=os.environ.get('CAIRN_BMAD_REPOSITORY', str(Path(__file__).resolve().parents[3] / 'BMAD-METHOD')),
-        grilling_repository=os.environ.get('CAIRN_GRILLING_REPOSITORY', str(Path(__file__).resolve().parents[3] / 'skills')))), call=call)
-    directory = tmp_path / 'runs' / 'native-run'
-    directory.mkdir(parents=True)
-    try:
-        output, session = asyncio.run(asyncio.wait_for(run_turn(dispatcher,
-            SimpleNamespace(project=SimpleNamespace(id='native-test', development=SimpleNamespace(repository=str(repository))), hints=[]),
-            SimpleNamespace(work=SimpleNamespace(result={'message_id': 1})), worker,
-            {'id': 'native-run', 'token': 'local-lease'}, directory, repository, TaskCancellation()), 60))
-        saved_session[0], current_input[0] = session, 2
-        resumed_directory = tmp_path / 'runs' / 'resumed-run'
-        resumed_directory.mkdir()
-        resumed, resumed_session = asyncio.run(asyncio.wait_for(run_turn(dispatcher,
-            SimpleNamespace(project=SimpleNamespace(id='native-test', development=SimpleNamespace(repository=str(repository))), hints=[]),
-            SimpleNamespace(work=SimpleNamespace(result={'message_id': 2})), worker,
-            {'id': 'resumed-run', 'token': 'next-lease'}, resumed_directory, repository, TaskCancellation()), 60))
-        assert resumed['kind'] == 'design' and resumed_session == session
-    finally:
-        (tmp_path / 'guidance-state.json').write_text(json.dumps(guidance))
-        server.shutdown(); server.server_close(); thread.join(timeout=3)
-    assert guidance['delivered'] and guidance['observed'], 'Guidance must reach the actual native CLI model stream'
-    assert output['kind'] == 'design' and session
-    assert any(payload.get('pid') for action, payload in events if action.endswith('/heartbeat'))
-    activities = [p['data'].get('skill') for _, p in events if p.get('kind') == 'activity']
-    assert {'cairn-design', 'bmad-product-brief', 'grilling'} <= set(activities)
-    assert any(p.get('kind') == 'questions' and p['data']['questions'][0]['id'] == 'Q1' for _, p in events)
-    assert calls and any('mcp__cairn__ask_questions' in tools for tools in calls)
-
-
 @pytest.mark.parametrize("bounded", [False, True])
 def test_actual_review_cli_denies_source_edits_but_can_write_own_report(repository,tmp_path,bounded):
     from cairn.dispatcher.frozen_review import run_review, ReviewChecks
@@ -190,7 +94,7 @@ def test_actual_review_cli_denies_source_edits_but_can_write_own_report(reposito
     worker=WorkerConfig(name='review',type='claudecode',roles=['architect'],tier='strong',max_running=1,priority=0,
         env={'ANTHROPIC_BASE_URL':f'http://127.0.0.1:{server.server_port}','ANTHROPIC_AUTH_TOKEN':'local-test-only','ANTHROPIC_API_KEY':'',
              'ANTHROPIC_MODEL':'claude-sonnet-4-6','CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC':'1','HTTP_PROXY':'','HTTPS_PROXY':'','ALL_PROXY':'','NO_PROXY':'127.0.0.1,localhost'})
-    dispatcher=SimpleNamespace(call=lambda *args: {})
+    dispatcher=SimpleNamespace(call=lambda *args: {}, config=SimpleNamespace(server='http://127.0.0.1:1'), client=SimpleNamespace(_worker_token='local-worker'))
     project=SimpleNamespace(project=SimpleNamespace(id='test',development=SimpleNamespace(repository=str(repository))))
     checks = ReviewChecks(GitWorkspace(DevelopmentProject(repository=str(repository),design='Review implementation'),tmp_path/'data','test'),
         repository, [[sys.executable,'-c',"import os;from pathlib import Path;p=Path(os.environ['CAIRN_ARTIFACT_DIR'])/'count';p.write_text(p.read_text()+'x' if p.exists() else 'x')"]], run_dir, TaskCancellation()) if bounded else None
@@ -207,3 +111,76 @@ def test_actual_review_cli_denies_source_edits_but_can_write_own_report(reposito
         assert (run_dir/'review-check-0'/'count').read_text() == 'x'
         assert len(checks.results) == 1
         assert any('"reused": true' in json.dumps(body) .replace('\\"','"') for body in requests)
+
+
+def test_native_design_mcp_and_keyboard_guidance_resume(repository,tmp_path):
+    from cairn.dispatcher.design_terminal import run_console
+    from cairn.dispatcher.development import atomic_json
+    from cairn.dispatcher.runtime.git_workspace import git
+    import uuid
+    workspace=tmp_path/'design'; workspace.mkdir()
+    skill=workspace/'.claude/skills/cairn-design/SKILL.md'; skill.parent.mkdir(parents=True)
+    skill.write_text('Use Cairn tools. Never approve a design.')
+    (workspace/'context.json').write_text(json.dumps({'draft':{'session':None}}))
+    run_dir=tmp_path/'run';run_dir.mkdir()
+    events=[]; prompts=[]; calls=[]
+    class Gateway(BaseHTTPRequestHandler):
+        def log_message(self,*args): pass
+        def do_POST(self):
+            body=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+            if '/development/' in self.path:
+                events.append((self.path,body))
+                data=json.dumps({'id':2,'version':1}).encode()
+                self.send_response(200);self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data);return
+            if 'count_tokens' in self.path:
+                data=b'{"input_tokens":100}'
+                self.send_response(200);self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data);return
+            calls.append(body)
+            first=bool(body.get('tools')) and not any(b.get('tools') for b in calls[:-1])
+            block={'type':'tool_use','id':'ask','name':'mcp__cairn__ask_questions','input':{}} if first else {'type':'text','text':''}
+            frames=[('message_start',{'type':'message_start','message':{'id':'msg'+str(len(calls)),'type':'message','role':'assistant','model':body['model'],'content':[],'stop_reason':None,'stop_sequence':None,'usage':{'input_tokens':100,'output_tokens':0}}}),
+                ('content_block_start',{'type':'content_block_start','index':0,'content_block':block}),
+                ('content_block_delta',{'type':'content_block_delta','index':0,'delta':{'type':'input_json_delta','partial_json':json.dumps({'questions':[{'id':'Q1','text':'Which audience?'}]})} if first else {'type':'text_delta','text':'Saved. Waiting for you.'}}),
+                ('content_block_stop',{'type':'content_block_stop','index':0}),
+                ('message_delta',{'type':'message_delta','delta':{'stop_reason':'tool_use' if first else 'end_turn','stop_sequence':None},'usage':{'output_tokens':20}}),('message_stop',{'type':'message_stop'})]
+            data=''.join('event: '+n+'\ndata: '+json.dumps(v)+'\n\n' for n,v in frames).encode()
+            self.send_response(200);self.send_header('Content-Type','text/event-stream');self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data)
+    server=ThreadingHTTPServer(('127.0.0.1',0),Gateway)
+    threading.Thread(target=server.serve_forever,daemon=True).start()
+    base=f'http://127.0.0.1:{server.server_port}'
+    worker=WorkerConfig(name='native',type='claudecode',roles=['planner'],tier='strong',max_running=1,priority=0,
+        env={'ANTHROPIC_BASE_URL':base,'ANTHROPIC_AUTH_TOKEN':'local-test-only','ANTHROPIC_API_KEY':'','ANTHROPIC_MODEL':'claude-sonnet-4-6',
+            'HTTP_PROXY':'','HTTPS_PROXY':'','ALL_PROXY':'','NO_PROXY':'127.0.0.1,localhost'})
+    dispatcher=SimpleNamespace(config=SimpleNamespace(server=base),client=SimpleNamespace(_worker_token='local-worker'),call=lambda *a: {})
+    project=SimpleNamespace(project=SimpleNamespace(id='test',development=SimpleNamespace(repository=str(repository))))
+    async def operate():
+        seen=None; sent=False
+        for _ in range(300):
+            await asyncio.sleep(.1)
+            state_file=run_dir/'terminal-state.json'
+            if not state_file.exists(): continue
+            state=json.loads(state_file.read_text())
+            if state['state']!='idle': continue
+            if not sent:
+                seen=state['time']; sent=True
+                atomic_json(run_dir/'operator-input.json',{'nonce':'local-input','time':time.time()})
+                (run_dir/'terminal-input.jsonl').write_text(json.dumps({'type':'input','data':'LOCAL_GUIDANCE'})+'\n'+json.dumps({'type':'input','data':'\r'})+'\n')
+            elif state['time']!=seen:
+                with (run_dir/'terminal-input.jsonl').open('a') as f:f.write(json.dumps({'type':'close'})+'\n')
+                return
+        raise AssertionError('Native terminal never completed both interactive turns')
+    async def scenario():
+        task=asyncio.create_task(operate())
+        try:
+            return await asyncio.wait_for(run_console(dispatcher,project,worker,{'id':'run','token':'local'},run_dir,repository,
+                TaskCancellation(),workspace=workspace,prompt='Design the feature.',session=str(uuid.uuid4()),message_id=1),35)
+        finally:
+            task.cancel();await asyncio.gather(task,return_exceptions=True)
+    try: result,session=asyncio.run(scenario())
+    finally:
+        server.shutdown();server.server_close()
+        (tmp_path/'model-debug.json').write_text(json.dumps({'calls':calls,'events':events}),encoding='utf-8')
+    assert 'Saved' in result and session
+    assert any(body.get('kind')=='questions' for _,body in events)
+    assert any(body.get('content')=='LOCAL_GUIDANCE' for path,body in events if path.endswith('/terminal/input'))
+    assert any('LOCAL_GUIDANCE' in json.dumps(body) for body in calls)

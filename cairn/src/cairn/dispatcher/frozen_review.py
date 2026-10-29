@@ -58,6 +58,11 @@ async def run_review(dispatcher, project, worker, run, directory, snapshot, prom
             raise RuntimeError("Frozen review material changed: " + item["target"])
         readable.add(path)
 
+    if checks is None:
+        from cairn.dispatcher.design_terminal import run_console
+        return await run_console(dispatcher, project, worker, run, directory, snapshot, cancellation,
+            workspace=snapshot, prompt=prompt, session=session, readable=readable, review=True)
+
     async def guard(inputs, tool_use_id, hook_context):
         if checks is not None and inputs.get("tool_name") == "mcp__cairn_review__run_check":
             return {}

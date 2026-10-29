@@ -74,89 +74,47 @@ def test_resumed_sessions_refresh_host_rules_without_reinstalling_pinned_skills(
     assert json.loads((tmp_path / 'skill-versions.json').read_text())['bmad'] == 'pinned'
 
 
-@pytest.mark.parametrize('resume,content', [(None, 'Design the feature'), ('existing-session', '/bmad-architecture')])
-@pytest.mark.parametrize('text_index,partial,turns,bundled', [(0, 'Question', 1, False), (1, 'Question', 1, False), (3, 'Quest', 1, False), (1, 'Question', 2, False), (1, 'Fir', 1, True)])
-def test_sdk_turn_automatically_orchestrates_and_resumes_with_persisted_questions(tmp_path, monkeypatch, resume, content, text_index, partial, turns, bundled):
-    workspace = tmp_path / 'project' / 'design-session'
-    skill = workspace / '.claude/skills/cairn-design/SKILL.md'
-    skill.parent.mkdir(parents=True)
-    skill.write_text('Invoke the real BMAD and grilling Skills.')
-    directory = tmp_path / 'runs' / 'run'
-    directory.mkdir(parents=True)
-    captured, events = {}, []
+@pytest.mark.parametrize('resume', [None, 'existing-session'])
+def test_native_turn_prepares_authoritative_context_and_resumes(tmp_path, monkeypatch, resume):
+    from cairn.dispatcher import design_terminal
+    captured = {}
     monkeypatch.setattr(design_session, 'prepare', lambda *args: None)
     monkeypatch.setattr(design_session, 'export_artifacts', lambda *args: None)
-    monkeypatch.setattr(design_session, 'git', lambda *args: 'a' * 40)
-    from cairn.dispatcher import development
-    monkeypatch.setattr(development, 'executable_argv', lambda *args: ['claude.exe'])
-
+    monkeypatch.setattr(design_session, 'git', lambda *args: 'a'*40)
+    async def console(*args, **kwargs):
+        captured.update(kwargs)
+        return 'Saved', kwargs['session']
+    monkeypatch.setattr(design_terminal,'run_console',console)
     def call(pid, action, payload=None):
-        if action.startswith('design?input_id='):
-            return {'draft': {'session': resume, 'baseline': '', 'version': 0}, 'messages': [
-                {'id': 1, 'kind': 'user', 'data': {'content': content, 'answers': {'Q1': 'Explicit choice'}}}]}
-        if action.endswith('/inputs'):
-            return {'items': [], 'closed': True}
-        events.append(payload)
-        return {'version': 1}
+        return {'draft':{'session':resume,'baseline':''}, 'messages':[{'id':1,'kind':'user','data':{'content':'Explicit choice'}}]} if action.startswith('design?') else {}
+    project=SimpleNamespace(project=SimpleNamespace(id='project',development=SimpleNamespace(repository=str(tmp_path/'repository'))),hints=[])
+    dispatcher=SimpleNamespace(directory=tmp_path,config=SimpleNamespace(design=None),call=call)
+    directory=tmp_path/'run';directory.mkdir()
+    result,session=asyncio.run(design_session.run_turn(dispatcher,project,SimpleNamespace(work=SimpleNamespace(result={'message_id':1,'revision_feedback':{'summary':'Fix conflict'}})),
+        None,{'id':'run','token':'lease'},directory,tmp_path/'snapshot',TaskCancellation()))
+    assert result['kind']=='design' and (session==resume if resume else bool(session))
+    assert captured['message_id']==1 and 'Explicit choice' in captured['prompt']
+    saved=(captured['workspace']/'context.json').read_text()
+    assert 'Fix conflict' in saved and 'native_work_schema' in saved
 
-    monkeypatch.setattr(sdk, 'create_sdk_mcp_server', lambda name, tools: {'type': 'sdk', 'name': name, 'tools': tools})
 
-    class Client:
-        def __init__(self, options, transport):
-            captured['options'] = options
-        async def __aenter__(self):
-            return self
-        async def __aexit__(self, *args):
-            pass
-        async def get_server_info(self):
-            return {'commands': [{'name': 'bmad-prd'}]}
-        async def query(self, prompt):
-            captured['prompt'] = prompt
-        async def receive_messages(self):
-            tools = {t.name: t for t in captured['options'].mcp_servers['cairn']['tools']}
-            await tools['ask_questions'].handler({'questions': [{'id': 'Q2', 'text': 'Next decision'}]})
-            guard = captured['options'].hooks['PreToolUse'][0].hooks[0]
-            captured['deny'] = await guard({'tool_name': 'Bash', 'tool_input': {'command': 'exit'}}, '', {})
-            await guard({'tool_name': 'Skill', 'tool_input': {'skill': 'bmad-prd'}}, '', {})
-            for number in range(turns):
-                yield sdk.StreamEvent('1', 'test', {'type': 'message_start'})
-                yield sdk.StreamEvent('2', 'test', {'type': 'content_block_start', 'index': text_index, 'content_block': {'type': 'text'}})
-                yield sdk.StreamEvent('3', 'test', {'type': 'content_block_delta', 'index': text_index, 'delta': {'type': 'text_delta', 'text': partial}})
-                if bundled:
-                    yield sdk.StreamEvent('4', 'test', {'type': 'content_block_start', 'index': 3, 'content_block': {'type': 'text'}})
-                    yield sdk.StreamEvent('5', 'test', {'type': 'content_block_delta', 'index': 3, 'delta': {'type': 'text_delta', 'text': 'Sec'}})
-                    yield sdk.AssistantMessage([sdk.TextBlock('First'), sdk.TextBlock('Second')], 'test')
-                else:
-                    yield sdk.AssistantMessage([sdk.TextBlock('Question')], 'test')
-            yield sdk.ResultMessage('success', 1, 1, False, 1, resume or 'new-session', result='Done')
-        async def interrupt(self):
-            captured['interrupt'] = True
-
-    monkeypatch.setattr(sdk, 'ClaudeSDKClient', Client)
-    project = SimpleNamespace(project=SimpleNamespace(id='project', development=SimpleNamespace(repository=str(tmp_path / 'repository'))), hints=[])
-    dispatcher = SimpleNamespace(directory=tmp_path, config=SimpleNamespace(design=None), call=call)
-    worker = SimpleNamespace(env={'ANTHROPIC_MODEL': 'strong'}, model=None)
-    intent = SimpleNamespace(work=SimpleNamespace(result={'message_id': 1, 'revision_feedback': {'summary': 'Fix the write conflict', 'version': 97}}))
-    output, session = asyncio.run(design_session.run_turn(dispatcher, project, intent, worker,
-        {'id': 'run', 'token': 'lease'}, directory, tmp_path / 'snapshot', TaskCancellation()))
-    assert output['kind'] == 'design'
-    options = captured['options']
-    assert options.resume == resume and options.setting_sources == ['project']
-    assert options.model == 'strong' and 'Skill' in options.tools and 'Bash' not in options.tools
-    assert captured['prompt'].startswith(content if content.startswith('/') else '/cairn-design')
-    assert captured['deny']['hookSpecificOutput']['permissionDecision'] == 'deny'
-    text_events = [e['data'] for e in events if e['kind'] == 'text']
-    assert len(text_events) == (4 if bundled else turns * (1 if partial == 'Question' else 2))
-    rendered = {}
-    for event in text_events:
-        key = event['block']
-        rendered[key] = event['text'] if event.get('mode') == 'snapshot' else rendered.get(key, '') + event['text']
-    assert list(rendered.values()) == (['First', 'Second'] if bundled else ['Question'] * turns)
-    assert any(e['kind'] == 'questions' for e in events)
-    assert any(e['kind'] == 'activity' and e['data']['skill'] == 'bmad-prd' for e in events)
-    assert 'Explicit choice' in (workspace / 'context.json').read_text()
-    assert 'Fix the write conflict' in (workspace / 'context.json').read_text()
-    assert session == resume if resume else bool(session)
+def test_native_hooks_fail_closed_and_require_operator_input(tmp_path,monkeypatch):
+    import hashlib
+    from cairn.dispatcher.terminal_bridge import hook
+    monkeypatch.setattr('cairn.dispatcher.terminal_bridge.CairnClient',lambda *a,**kw: SimpleNamespace(development=lambda *a:SimpleNamespace(ok=True)))
+    config={'review':False,'workspace':str(tmp_path/'workspace'),'snapshot':str(tmp_path/'snapshot'),
+        'directory':str(tmp_path),'prompt_hash':hashlib.sha256(b'first').hexdigest(),'message_id':1,
+        'server':'http://localhost','worker_token':'local','project':'project','run':'run','token':'lease'}
+    denied=hook(config,{'hook_event_name':'PreToolUse','tool_name':'Bash','tool_input':{'command':'echo unsafe'}})
+    assert denied['hookSpecificOutput']['permissionDecision']=='deny'
+    initial=hook(config,{'hook_event_name':'UserPromptSubmit','prompt':'first'})
+    assert '#1' in initial['hookSpecificOutput']['additionalContext']
+    assert hook(config,{'hook_event_name':'UserPromptSubmit','prompt':'forged'})['decision']=='block'
+    hook(config,{'hook_event_name':'Stop','last_assistant_message':'Done'})
+    import json
+    assert json.loads((tmp_path/'terminal-state.json').read_text())['state']=='idle'
+    review={**config,'review':True,'readable':[]}
+    assert hook(review,{'hook_event_name':'UserPromptSubmit','prompt':'change scope'})['decision']=='block'
 
 
 def test_frozen_review_tools_enforce_artifact_only_writes(tmp_path):

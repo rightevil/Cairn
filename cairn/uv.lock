@@ -55,6 +55,7 @@ dependencies = [
     { name = "click" },
     { name = "docker" },
     { name = "fastapi" },
+    { name = "pywinpty", marker = "sys_platform == 'win32'" },
     { name = "pyyaml" },
     { name = "requests" },
     { name = "uvicorn", extra = ["standard"] },
@@ -72,6 +73,7 @@ requires-dist = [
     { name = "click", specifier = ">=8.1" },
     { name = "docker", specifier = ">=7.1.0" },
     { name = "fastapi", specifier = ">=0.115" },
+    { name = "pywinpty", marker = "sys_platform == 'win32'", specifier = ">=3.1.1" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "requests", specifier = ">=2.32.3" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.34" },
@@ -767,6 +769,26 @@ wheels = [
     { url = "https://mirrors.aliyun.com/pypi/packages/c9/31/097f2e132c4f16d99a22bfb777e0fd88bd8e1c634304e102f313af69ace5/pywin32-311-cp314-cp314-win32.whl", hash = "sha256:b7a2c10b93f8986666d0c803ee19b5990885872a7de910fc460f9b0c2fbf92ee" },
     { url = "https://mirrors.aliyun.com/pypi/packages/90/4b/07c77d8ba0e01349358082713400435347df8426208171ce297da32c313d/pywin32-311-cp314-cp314-win_amd64.whl", hash = "sha256:3aca44c046bd2ed8c90de9cb8427f581c479e594e99b5c0bb19b29c10fd6cb87" },
     { url = "https://mirrors.aliyun.com/pypi/packages/c0/d2/21af5c535501a7233e734b8af901574572da66fcc254cb35d0609c9080dd/pywin32-311-cp314-cp314-win_arm64.whl", hash = "sha256:a508e2d9025764a8270f93111a970e1d0fbfc33f4153b388bb649b7eec4f9b42" },
+]
+
+[[package]]
+name = "pywinpty"
+version = "3.1.1"
+source = { registry = "https://mirrors.aliyun.com/pypi/simple" }
+sdist = { url = "https://mirrors.aliyun.com/pypi/packages/c0/27/ce402aa02b9150bb8f75e56dfa540ee907991404879d8ad8d195502869c2/pywinpty-3.1.1.tar.gz", hash = "sha256:11a5be70f45597ce8fc154e38399a95db4864adce98a0b53a843711fdbb9e7ba" }
+wheels = [
+    { url = "https://mirrors.aliyun.com/pypi/packages/a8/4d/8185fe80a32d7805c30c1b2dcb5bdb8de3f1568de86c8bc673dd631e2a9c/pywinpty-3.1.1-cp312-cp312-win_amd64.whl", hash = "sha256:f06a4778e1b7f7b05abf3e22af38cdda0295a9106675d2d2a03c43351ef05868" },
+    { url = "https://mirrors.aliyun.com/pypi/packages/5d/94/83ff744093505bb48eeac44cdb6ddf6b2cd386842dc68ad910ffb3b08100/pywinpty-3.1.1-cp312-cp312-win_arm64.whl", hash = "sha256:4486c84321d68030f5aa1556425aa0d4168520ae9c5260739bb74f8dfb5533fc" },
+    { url = "https://mirrors.aliyun.com/pypi/packages/7c/59/7f17cae608748e93deab8ff6eae737b5f6d13c548759edf394c244d7ada2/pywinpty-3.1.1-cp313-cp313-win_amd64.whl", hash = "sha256:ab527152d3eae13466f88d762f7335cae580b4afe1729b44ca9cb2919c7d1ebf" },
+    { url = "https://mirrors.aliyun.com/pypi/packages/e8/41/bb857a0847fa3ce837ee070f211ce0ee7f1be171870329b5d4a6e06afccc/pywinpty-3.1.1-cp313-cp313-win_arm64.whl", hash = "sha256:936f80af9a8a29c875cebcea72a1717c285a37dc2989a3390506f094ffac361d" },
+    { url = "https://mirrors.aliyun.com/pypi/packages/67/9a/34b0dd29691b9293af3164af99e01b035d8a2d35dea533b558b9eb6d1593/pywinpty-3.1.1-cp314-cp314-win_amd64.whl", hash = "sha256:c737cefc5e535a3b6825b653a8d5267ca71820057a7e5414bed4bc0bbfc78874" },
+    { url = "https://mirrors.aliyun.com/pypi/packages/32/ab/29bf21e0160cbd86bddb99515f4a74bafc5046691b3831144fbff1a4e43b/pywinpty-3.1.1-cp314-cp314-win_arm64.whl", hash = "sha256:4a0d47afe0e3642a2d04775e157de5dad1d63853905816994e4b0db2083476f4" },
+    { url = "https://mirrors.aliyun.com/pypi/packages/c1/bc/b9731bcb92f7482311fe6fb49ef586d5de15bbf1599f500637a4f19c5ec5/pywinpty-3.1.1-cp314-cp314t-win_amd64.whl", hash = "sha256:4b2aa07e260dabe37cc454821ed2755d35ea13015c5e127f7d087e18dd2a5650" },
+    { url = "https://mirrors.aliyun.com/pypi/packages/6a/b5/befe62c1d7db9f9a373307bd4444603dad7223fc0cee7d99bb7b69b60db0/pywinpty-3.1.1-cp314-cp314t-win_arm64.whl", hash = "sha256:c017b5868b1d9975770f41b8e115c7be06e9dcc2385f10ba62780559249f5f98" },
+    { url = "https://mirrors.aliyun.com/pypi/packages/d4/1e/d8c69f9a098f22a7cf5bd25cce5cfc5dedd97d5772f5d92d71e406cd5fd8/pywinpty-3.1.1-cp315-cp315-win_amd64.whl", hash = "sha256:c483457c162fdeb59bcb3e17df9a6ea0146e5c6c1768b9b73f7a5f5c3929ba69" },
+    { url = "https://mirrors.aliyun.com/pypi/packages/45/90/ae33a7901877a1c3f7dba4ca7b6390b29705a080f210e7b7099e8ce52c2b/pywinpty-3.1.1-cp315-cp315-win_arm64.whl", hash = "sha256:015283ea268d53bdcafdbf38edc007d8b9e33be52700c63167cf8c2ca0498f50" },
+    { url = "https://mirrors.aliyun.com/pypi/packages/59/81/6edfccc995fc4c3cda81a6eb0f40bdad25fa0c0c3c4a32b89099b9167d4d/pywinpty-3.1.1-cp315-cp315t-win_amd64.whl", hash = "sha256:34d7a543e4932e19c078ef03f69947a1ffddd9c08a137f56dbe662486782bf31" },
+    { url = "https://mirrors.aliyun.com/pypi/packages/ed/30/4f0373d5cbb2640a4c9bce6505bd28efc8ef33de0a8ba24aabaa1396c48a/pywinpty-3.1.1-cp315-cp315t-win_arm64.whl", hash = "sha256:549b6927488017258718387e17cb361f622ae3faf988e79875392dd1151e3aca" },
 ]
 
 [[package]]

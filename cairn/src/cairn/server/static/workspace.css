@@ -49,3 +49,5 @@
 .graph-state.review { border-color: var(--graph-cool); color: var(--graph-cool); }
 .graph-state.verified { border-color: var(--graph-ok); color: var(--graph-ok); }
 .graph-state.waiting { border-style: double; border-width: 3px; border-color: var(--graph-bad); color: var(--graph-bad); }
+
+.native-terminal{flex:1;min-height:280px;overflow:hidden;padding:16px;background:var(--graph-paper)}.native-terminal .xterm{height:100%}.agent-main .native-terminal{height:calc(100dvh - 180px)}

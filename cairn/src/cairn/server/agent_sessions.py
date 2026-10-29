@@ -29,11 +29,12 @@ def sessions(conn, project_id):
                             "WHERE r.project_id=? ORDER BY r.rowid", (project_id,)):
         work = json.loads(row["work"] or "{}")
         subject = records.get(work.get("subject"), {}).get("work", {})
-        design = work.get("purpose") == "design" or bool(subject.get("result", {}).get("design_candidate"))
+        author = work.get('purpose')=='design' or bool(work.get('result',{}).get('design_candidate'))
+        design = author or bool(subject.get("result", {}).get("design_candidate"))
         actual = row["session"] or (draft.session if design else None)
         key = "session:" + actual if actual else "run:" + row["id"]
         group = groups.setdefault(key, {"key": key, "session": actual, "main": False, "runs": [], "title": ""})
-        group["main"] |= work.get("purpose") == "design" and (not draft.session or actual == draft.session)
+        group["main"] |= author and (not draft.session or actual == draft.session)
         group["title"] = "方案设计主会话" if group["main"] else "独立方案评审" if design and row["role"] in ("architect", "reviewer") else "历史方案设计" if design else (
             "独立评审" if row["role"] in ("architect", "reviewer") else "实施" if row["role"] == "implementer" else "集成" if row["role"] == "integration" else "规划")
         public = public_run(row)

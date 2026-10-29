@@ -248,7 +248,17 @@ def readiness(conn, project_id, draft):
                           "ORDER BY r.rowid DESC LIMIT 1", (project_id,)).fetchone()
     if not author or not author["applied"]:
         issues.append("设计尚无已完成并应用的输出")
-    return {"ready": not issues, "issues": issues, "version": draft.version}
+    closeable = None
+    from cairn.server.terminal import terminal_files
+    for row in conn.execute("SELECT id FROM runs WHERE project_id=? AND state='running'",(project_id,)):
+        try:
+            _, path, work = terminal_files(conn,project_id,row['id'])
+            state = json.loads((path.parent/'terminal-state.json').read_text(encoding='utf-8'))
+            if work.purpose=='design' and state.get('state')=='idle': closeable=row['id']
+        except (HTTPException,OSError,ValueError): pass
+    deferred = {'请等待当前任务完成并应用结果','设计尚无已完成并应用的输出'}
+    return {"ready": not issues, "issues": issues, "version": draft.version,
+        "closeable_run":closeable,"ready_for_close":bool(closeable and not (set(issues)-deferred))}
 
 
 @router.post("/messages", dependencies=[Depends(require_operator)], status_code=201)

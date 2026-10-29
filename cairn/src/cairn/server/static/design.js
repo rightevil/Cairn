@@ -11,6 +11,19 @@ function designFeatures() {
 
     toolHTML(entry) { return agentToolHTML(entry, this.toolOpen[entry.id]); },
 
+    terminalStates: {},
+    reconnectDesignTerminal() { cairnTerminal?.dispose(); this.$nextTick(()=>this.syncDesignTerminal()); },
+    designTerminalRun() {
+      const session = this.selectedAgentSession() || this.projectSessions().find(s => s.main);
+      return session?.runs.filter(r => r.streams?.terminal).at(-1) || null;
+    },
+    syncDesignTerminal() {
+      const run = this.designTerminalRun();
+      const host = this.selectedAgentSession() ? this.$refs.reviewTerminal : this.$refs.designTerminal;
+      if (run && host && this.sideTab === 'design' && this.view === 'graph') mountDesignTerminal(host,this.selectedProjectId,run,(id,state) => {this.terminalStates[id]=state;});
+      else if (typeof cairnTerminal !== 'undefined') cairnTerminal?.dispose();
+    },
+
     allAgentSessions() { return this.developmentState.sessions || []; },
     projectSessions() { return this.allAgentSessions().filter(s => s.main || s.runs.some(r => r.design_conversation)); },
     selectedAgentSession() { return this.allAgentSessions().find(s => s.key === this.agentSessionKey && !s.main) || null; },
@@ -98,7 +111,7 @@ function designFeatures() {
     },
 
     canSubmitDesign() {
-      return !this.designSending && !this.designBusy() && this.designReadiness.ready
+      return !this.designSending && !this.designBusy() && !!(this.designReadiness.ready || this.designReadiness.ready_for_close)
         && this.designReadiness.version === this.designDraft.version;
     },
 
@@ -119,6 +132,8 @@ function designFeatures() {
     },
 
     designBusy() {
+      const native = this.projectSessions().find(s => s.main)?.runs.at(-1);
+      if (native?.streams?.terminal && this.terminalStates[native.id] === 'idle') return false;
       return (this.project?.intents || []).some(i => i.work?.purpose === 'design' && ['ready', 'running', 'implemented'].includes(i.work.state));
     },
 
@@ -253,6 +268,16 @@ function designFeatures() {
       this.designSending = true;
       const projectId = this.selectedProjectId;
       try {
+        if (action === 'candidate' && this.designReadiness.closeable_run) {
+          await this.api('POST',`/projects/${projectId}/development/runs/${this.designReadiness.closeable_run}/terminal/close`,{});
+          for (let attempt=0;attempt<40;attempt++) {
+            await new Promise(resolve=>setTimeout(resolve,500));
+            await this.loadProject(projectId);
+            if (this.selectedProjectId!==projectId) return;
+            if (this.designReadiness.ready) break;
+          }
+          if (!this.designReadiness.ready) throw new Error('终端已请求保存关闭，等待调度器应用完成后可再次送审。');
+        }
         await this.api('POST', `/projects/${projectId}/development/design/${action}`, {
           version: this.designDraft.version, digest: this.designDraft.candidate.digest || (action === 'reopen' ? this.designReview?.digest : '') || ''
         });

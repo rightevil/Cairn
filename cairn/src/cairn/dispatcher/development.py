@@ -536,7 +536,7 @@ def classify_failure(detail):
     if code == 429 or re.search(r'\b(?:rate limit(?:ed)?|quota exceeded|usage limit reached)\b', message, re.I):
         return "capacity", message[-2000:]
     if (code in (401, 403, 408, 500, 502, 503, 504, 529)
-            or re.search(r'\b(?:ENOTFOUND|EAI_AGAIN|ECONNRESET|ECONNREFUSED|ETIMEDOUT)\b|connection (?:error|failed)|network error', message, re.I)):
+            or re.search(r'\b(?:ENOTFOUND|EAI_AGAIN|ECONNRESET|ECONNREFUSED|ETIMEDOUT)\b|connection (?:error|failed)|network error|Claude upstream request failed', message, re.I)):
         return "infrastructure", message[-2000:]
     return "failed", message[-2000:]
 
