@@ -9,6 +9,8 @@ vm.runInContext(fs.readFileSync(path.join(root, 'agent-output.js'), 'utf8'), con
 vm.runInContext(fs.readFileSync(path.join(root, 'development.js'), 'utf8'), context);
 vm.runInContext(fs.readFileSync(path.join(root, 'design.js'), 'utf8'), context);
 const html = fs.readFileSync(path.join(root, 'index.html'), 'utf8');
+assert(!html.includes('class="composer"'),'Design views must never fall back to a web chat composer');
+assert(!html.includes('x-ref="designComposer"') && !html.includes('x-ref="questionAnswer"'),'All typed design input belongs in the native terminal');
 vm.runInContext(fs.readFileSync(path.join(root, 'workspace.js'), 'utf8'), context);
 const app = context.cairnApp();
 assert.equal(app.panelOpen,false,'Keep the canvas unobstructed until a node is selected');

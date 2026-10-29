@@ -239,3 +239,6 @@ def test_native_design_mcp_and_keyboard_guidance_resume(repository,tmp_path,empt
     assert any(body.get('kind')=='questions' for _,body in events)
     assert any(body.get('content')=='LOCAL_GUIDANCE' for path,body in events if path.endswith('/terminal/input'))
     assert any('LOCAL_GUIDANCE' in json.dumps(body) for body in calls)
+    saved=json.loads((run_dir/'conversation.json').read_text(encoding='utf-8'))
+    assert any('LOCAL_GUIDANCE' in entry['text'] for entry in saved['entries'])
+    assert any('Saved. Waiting for you.' in entry['text'] for entry in saved['entries'])

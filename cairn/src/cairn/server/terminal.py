@@ -6,7 +6,7 @@ from pathlib import Path
 import time
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
 from cairn.server.access import require_operator, require_worker, require_reader, local_browser
@@ -17,13 +17,16 @@ router = APIRouter(prefix="/projects/{project_id}/development/runs/{run_id}", ta
 owners = {}
 
 
-def terminal_files(conn, project_id, run_id):
+def terminal_files(conn, project_id, run_id, *, allow_history=False):
     row = conn.execute("SELECT * FROM runs WHERE project_id=? AND id=?", (project_id, run_id)).fetchone()
     if row is None: raise HTTPException(404, "Run not found")
     stream = json.loads(row["streams"]).get("terminal")
-    if not stream: raise HTTPException(404, "此运行没有真实终端")
-    path = Path(stream).resolve()
     config = store.project(conn, project_id)
+    if not stream:
+        if not allow_history: raise HTTPException(404, "此运行没有真实终端")
+        from cairn.workspace import project_workspace
+        stream = project_workspace(config,project_id,Path(config.repository)/'.cairn/workspaces')/'runs'/run_id/'terminal.log'
+    path = Path(stream).resolve()
     if (path.name != "terminal.log" or path.parent.name != run_id or path.parent.parent.name != "runs"
             or path.parent.parent.parent.name != project_id):
         raise HTTPException(403, "Invalid terminal ownership")
@@ -62,6 +65,34 @@ def metrics(project_id: str, run_id: str):
     return {'samples':{event:{'count':len(items),'median_ms':sorted(items)[len(items)//2],
         'p95_ms':sorted(items)[min(len(items)-1,int(len(items)*.95))]} for event,items in values.items()},
         'scope':'Recent transport/hook measurements only; not model generation or gateway latency.'}
+
+
+@router.get('/terminal/history', dependencies=[Depends(require_reader)])
+def history(project_id: str, run_id: str, before: int | None = Query(default=None,ge=0), limit: int = Query(default=200,ge=1,le=500)):
+    from cairn.dispatcher.runtime.terminal_history import source, messages
+    with get_conn() as conn:
+        row, terminal, work = terminal_files(conn,project_id,run_id,allow_history=True)
+        directory, session = terminal.parent, row['session']
+        private_file = directory/'terminal-private.json'
+        private = json.loads(private_file.read_text(encoding='utf-8')) if private_file.is_file() else {}
+        path = source(directory,session,private.get('profile_root'))
+        entries, origin = [], 'none'
+        if path:
+            entries, origin = messages(path,session), 'claude'
+        elif (directory/'conversation.json').is_file():
+            archived = json.loads((directory/'conversation.json').read_text(encoding='utf-8'))
+            if archived.get('session') == session: entries, origin = archived['entries'], 'archive'
+        if not entries and work.purpose == 'design':
+            for item in conn.execute("SELECT id,kind,data FROM design_messages WHERE project_id=? AND kind IN ('user','text') ORDER BY id",(project_id,)):
+                data = json.loads(item['data']); text = data.get('content') if item['kind'] == 'user' else data.get('text')
+                if text: entries.append({'id':'saved:'+str(item['id']),'role':'你' if item['kind']=='user' else 'Agent','text':text})
+            if entries: origin = 'saved_design'
+        if not entries:
+            output = work.result.get('output') or json.loads(row['result']).get('output') or {}
+            if output.get('summary'): entries, origin = [{'id':'result','role':'Agent','text':output['summary']}], 'saved_review'
+    end = min(before if before is not None else len(entries),len(entries)); start = max(0,end-limit)
+    return {'entries':[{**item,'index':start+i} for i,item in enumerate(entries[start:end])],
+        'before':start if start else None,'total':len(entries),'source':origin}
 
 
 class NativeInput(BaseModel):

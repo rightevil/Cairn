@@ -2,6 +2,7 @@
 import asyncio
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 import queue
@@ -21,7 +22,7 @@ async def run_console(dispatcher, project, worker, run, directory, snapshot, can
     private = {'server':dispatcher.config.server,'worker_token':dispatcher.client._worker_token,
         'project':pid,'run':run['id'],'token':run['token'],'directory':str(directory),
         'workspace':str(workspace),'snapshot':str(snapshot),'repository':project.project.development.repository,
-        'review':review,'readable':[str(p) for p in readable],'message_id':message_id,
+        'review':review,'session':session,'readable':[str(p) for p in readable],'message_id':message_id,
         'prompt_hash':hashlib.sha256(prompt.encode()).hexdigest() if prompt else None}
     atomic_json(directory/'terminal-private.json',private)
     hook = {'type':'command','command':sys.executable,'args':['-m','cairn.dispatcher.terminal_bridge','hook'],
@@ -63,6 +64,8 @@ async def run_console(dispatcher, project, worker, run, directory, snapshot, can
         if not prefs.exists(): atomic_json(prefs,{'hasCompletedOnboarding':True,'theme':'light',
             'projects':{(workspace if not review else snapshot).resolve().as_posix():{'hasTrustDialogAccepted':True,'projectOnboardingSeenCount':1}}})
         env['CLAUDE_CONFIG_DIR']=str(profile)
+    private['profile_root'] = env.get('CLAUDE_CONFIG_DIR') or os.environ.get('CLAUDE_CONFIG_DIR') or str(Path.home()/'.claude')
+    atomic_json(directory/'terminal-private.json',private)
     for name in ('stdout.log','stderr.log','terminal.log'): (directory/name).touch()
     (directory/'reports').mkdir(exist_ok=True)
     atomic_json(directory/'terminal-state.json',{'state':'starting','time':time.time()})
@@ -150,3 +153,7 @@ async def run_console(dispatcher, project, worker, run, directory, snapshot, can
         stop_read.set()
         console.close()
         if reader.is_alive(): reader.join(timeout=2)
+        from cairn.dispatcher.runtime.terminal_history import archive
+        try: await asyncio.to_thread(archive,private,{'session_id':session})
+        except (OSError,ValueError) as exc:
+            logging.getLogger(__name__).warning('Conversation archive unavailable run=%s error=%s',run['id'],exc)

@@ -219,8 +219,9 @@ body { padding: 0; background: var(--color-paper-2); }
 .design-panel { width: clamp(300px,26vw,360px); }
 .terminal-toolbar { font-size: 12px; padding: 8px 16px; background: var(--glass-hi); }
 .native-terminal { padding: 10px 12px; }
-.terminal-viewport { width: 100%; height: 100%; min-height: 0; position:relative; }
-.terminal-history{position:absolute;inset:0;z-index:3;background:var(--graph-paper);padding:12px;overflow:auto;overscroll-behavior:contain}.terminal-history button{position:sticky;top:0}.terminal-history pre{white-space:pre-wrap;font:13px/1.6 var(--font-mono)}
+.terminal-viewport { width: 100%; height: 100%; min-height: 0; position:relative; display:flex; flex-direction:column; }
+.terminal-view-controls{display:flex;align-items:center;gap:6px;flex-shrink:0;flex-wrap:wrap;border-bottom:1px solid var(--border);padding:2px 0 6px}.terminal-view-controls .quiet{font-size:11px;min-height:28px}.terminal-view-controls .muted{font-size:11px}
+.terminal-live,.terminal-history{flex:1;min-height:0;overflow:hidden;background:var(--graph-paper)}.terminal-history .xterm{height:100%}
 .design-mode-bar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:8px 16px;border-bottom:1px solid var(--border);font-size:12px;flex-shrink:0}.design-mode-bar [aria-pressed=true]{background:var(--soft);border-color:var(--accent)}.terminal-connection{padding:8px 16px}
 .native-terminal .xterm-viewport { overscroll-behavior: contain; }
 .native-terminal .xterm .xterm-viewport { background: var(--graph-paper); }

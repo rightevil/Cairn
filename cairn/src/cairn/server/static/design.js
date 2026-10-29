@@ -48,10 +48,12 @@ function designFeatures() {
       return ({idle:'已连接 · 等待输入',working:'已连接 · 正在处理',starting:'终端启动中',connecting:'正在连接',disconnected:'连接已断开',closed:'会话已结束'})[this.terminalStates[run.id]] || '正在连接终端';
     },
     syncDesignTerminal() {
-      const run = this.designTerminalRun();
-      const review = !!this.selectedAgentSession(), projectId = this.selectedProjectId;
-      if (run && this.sideTab === 'design' && this.view === 'graph') this.$nextTick(() => {
-        if (this.selectedProjectId !== projectId || this.sideTab !== 'design' || this.view !== 'graph' || this.designTerminalRun()?.id !== run.id) return;
+      const session = this.selectedAgentSession() || this.projectSessions().find(s => s.main);
+      const old = session?.runs.at(-1);
+      const run = this.designTerminalRun() || (old ? {...old,historyOnly:true} : null);
+      const review = !!this.selectedAgentSession(), projectId = this.selectedProjectId, sessionKey = this.agentSessionKey;
+      if (this.sideTab === 'design' && this.view === 'graph') this.$nextTick(() => {
+        if (this.selectedProjectId !== projectId || this.sideTab !== 'design' || this.view !== 'graph' || this.agentSessionKey !== sessionKey) return;
         const host = review ? this.$refs.reviewTerminal : this.$refs.designTerminal;
         if (host) mountDesignTerminal(host,projectId,run,(id,state) => {this.terminalStates[id]=state;});
       });
