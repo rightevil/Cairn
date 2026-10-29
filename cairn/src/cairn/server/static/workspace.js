@@ -7,7 +7,7 @@ function cairnApp() {
     view: 'list', sideTab: 'design', projects: [], project: null, selectedProjectId: '',
     loadingProject: false, loadingList: true, connectionError: '', polling: false,
     projectSearch: '', panelOpen: true, boardTab: 'graph', taskFilter: 'all', graphHistory: false, graphFocus: '', graphRunCursor: -1, selection: null, graphSignature: '',
-    showNewProject: false, creatingProject: false, folderOpen: false, folderLoading: false,
+    showNewProject: false, creatingProject: false, folderOpen: false, folderLoading: false, controlOpen: false,
     folderState: { directory: null, name: '', parent: null, breadcrumbs: [], entries: [] },
     folderError: '', folderSearch: '', folderRequest: 0,
     newFolderVisible: false, newFolderName: '', newFolderError: '', folderCreating: false,
@@ -18,17 +18,18 @@ function cairnApp() {
 
     async init() {
       const returnFocus = new Map();
-      for (const field of ['showNewProject', 'developmentArtifact.open', 'folderOpen', 'deleteTarget']) this.$watch(field, open => {
+      for (const field of ['showNewProject', 'developmentArtifact.open', 'folderOpen', 'deleteTarget', 'controlOpen']) this.$watch(field, open => {
         if (open) {
           returnFocus.set(field, document.activeElement);
           this.$nextTick(() => {
             const modal = [...document.querySelectorAll('[role="dialog"]')].reverse().find(e => e.getBoundingClientRect().height && !e.inert);
-            modal?.querySelector('button:not(:disabled),input:not(:disabled)')?.focus();
+            (modal?.querySelector('textarea:not(:disabled),input:not(:disabled)') || modal?.querySelector('button:not(:disabled)'))?.focus();
           });
         } else if (returnFocus.get(field)?.isConnected) returnFocus.get(field).focus();
       });
       await this.loadProjects();
       await this.route();
+      window.addEventListener('pagehide', () => { this.designStream?.abort(); if (typeof cairnTerminal !== 'undefined') cairnTerminal?.dispose(); });
       setInterval(() => { if (this.selectedAgentSession()) this.loadAgentConversation(); }, 1000);
       window.addEventListener('hashchange', () => this.route());
       setInterval(async () => {
@@ -43,7 +44,7 @@ function cairnApp() {
     },
 
     trapDialog(event) {
-      const controls = [...event.currentTarget.querySelectorAll('button:not(:disabled), input:not(:disabled), a[href]')]
+      const controls = [...event.currentTarget.querySelectorAll('button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled), a[href]')]
         .filter(e => e.getBoundingClientRect().height);
       const target = event.shiftKey ? controls.at(-1) : controls[0];
       if (document.activeElement === (event.shiftKey ? controls[0] : controls.at(-1))) { event.preventDefault(); target?.focus(); }
@@ -119,6 +120,7 @@ function cairnApp() {
     navigateList() { location.hash = ''; },
 
     async openProject(id, stage = null) {
+      this.controlOpen = false;
       this.designStream?.abort(); this.destroyGraph();
       this.selectedProjectId = id; this.project = null; this.selection = null;
       this.designProject = ''; this.designCursor = 0;
@@ -126,7 +128,7 @@ function cairnApp() {
       this.designDraft = designFeatures().designDraft; this.designEntries = []; this.designError = '';
       this.fileSuggestions = [];
       this.agentSessionKey = ''; this.agentRunTexts = {};
-      this.view = 'graph'; this.loadingProject = true; this.panelOpen = true;
+      this.view = 'graph'; this.loadingProject = true; this.panelOpen = !(window.innerWidth < 960);
       this.sideTab = stage === 'development' ? 'development' : stage === 'design' ? 'design'
         : this.projects.find(p => p.id === id)?.development?.phase === 'design' ? 'design' : 'development';
       try { await this.loadProject(id); }
@@ -298,7 +300,11 @@ function cairnApp() {
       } catch (e) { this.showToast(e.message, 'error'); }
     },
     async submitBlackboard() {
-      if (this.project?.project.development) return this.submitDevelopmentControl();
+      if (this.project?.project.development) {
+        await this.submitDevelopmentControl();
+        if (!this.developmentControl.content.trim()) this.controlOpen = false;
+        return;
+      }
       if (!this.developmentControl.content.trim()) return;
       try {
         await this.api('POST', `/projects/${this.selectedProjectId}/hints`, { content: this.developmentControl.content, creator: 'operator' });
@@ -349,13 +355,13 @@ function cairnApp() {
         }
         const token = name => getComputedStyle(document.documentElement).getPropertyValue('--graph-' + name).trim();
         workspaceGraph = cytoscape({ container, elements, minZoom: 0.1, maxZoom: 2.5,
-          layout: { name: 'dagre', rankDir: 'LR', padding: 40, nodeSep: 42, rankSep: 80 },
+          layout: { name: 'dagre', rankDir: 'LR', fit: false, padding: 40, nodeSep: 42, rankSep: 80 },
           style: [
             { selector:'node', style:{label:'data(label)','font-family':getComputedStyle(document.documentElement).getPropertyValue('--font-body').trim(),'font-size':13,color:token('ink'),'text-wrap':'wrap','text-max-width':172,'text-valign':'center','background-color':token('paper'),shape:'roundrectangle',width:200,height:96,'border-width':2,'border-color':token('muted')} },
-            { selector:'node[kind="fact"]',style:{shape:'hexagon','background-color':token('paper'),'border-color':token('cool'),color:token('cool'),'border-style':'dashed',opacity:.65} },
+            { selector:'node[kind="fact"]',style:{shape:'hexagon','background-color':token('paper'),'border-color':token('cool'),color:token('cool'),'border-style':'dashed'} },
             { selector:'node[state="running"]',style:{'border-color':token('accent'),'border-width':4,color:token('accent')} },
             { selector:'node[state="running"][role="reviewer"], node[state="running"][role="architect"]',style:{'border-color':token('cool'),color:token('cool'),shape:'cutrectangle'} },
-            { selector:'node[state="verified"]',style:{'border-color':token('ok'),color:token('ok'),opacity:.75} },
+            { selector:'node[state="verified"]',style:{'border-color':token('ok'),color:token('ok')} },
             { selector:'node[state="reviewing"], node[state="approved"], node[state="merged"], node[state="implemented"]',style:{'border-color':token('cool'),color:token('cool'),shape:'cutrectangle'} },
             { selector:'node[state="waiting"], node[state="failed"], node[state="blocked"]',style:{'border-color':token('bad'),color:token('bad'),'border-style':'double'} },
             { selector:'edge',style:{width:2,'line-color':token('muted'),'target-arrow-color':token('muted'),'target-arrow-shape':'triangle','curve-style':'bezier'} },
@@ -363,6 +369,13 @@ function cairnApp() {
             { selector:':selected',style:{'border-color':token('ink'),'border-width':4} },
           ] });
         workspaceGraph.on('tap', 'node', event => { this.selectItem(event.target.data('kind'), event.target.data('ref')); });
+        workspaceGraph.ready(() => requestAnimationFrame(() => {
+          if (!workspaceGraph) return;
+          workspaceGraph.resize(); workspaceGraph.zoom(.95);
+          const running = workspaceGraph.nodes().filter(n => n.data('state')==='running');
+          const active = running.length ? running : workspaceGraph.nodes().filter(n => n.data('state')==='reviewing');
+          workspaceGraph.center(active.length ? active.first() : workspaceGraph.nodes().first());
+        }));
         workspaceGraphObserver = new ResizeObserver(() => workspaceGraph?.resize());
         workspaceGraphObserver.observe(container);
       });

@@ -4,9 +4,10 @@ function mountDesignTerminal(host, project, run, onState) {
   if (cairnTerminal?.host === host && cairnTerminal?.run === run.id) return;
   cairnTerminal?.dispose();
   host.replaceChildren();
+  const palette=getComputedStyle(document.documentElement), color=name=>palette.getPropertyValue(name).trim();
   const terminal = new Terminal({cursorBlink:true,convertEol:false,scrollback:8000,
     fontFamily:'Consolas, "Cascadia Mono", monospace',fontSize:14,
-    theme:{background:'#f7f5f0',foreground:'#29303a',cursor:'#575b9a',selectionBackground:'#c8c9ed'}});
+    theme:{background:color('--graph-paper'),foreground:color('--graph-ink'),cursor:color('--graph-cool'),selectionBackground:color('--terminal-selection')}});
   const fit = new FitAddon.FitAddon(); terminal.loadAddon(fit); terminal.open(host);
   const socket = new WebSocket(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/projects/${encodeURIComponent(project)}/development/runs/${encodeURIComponent(run.id)}/terminal`);
   let readonly = true;

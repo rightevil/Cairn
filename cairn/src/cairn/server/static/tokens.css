@@ -1,0 +1,33 @@
+/* Hallmark · theme: dusk (by request, light top only) · shape: app screen · redesign: full
+ * signature: native Fact–Intent canvas · posture: restrained · material: translucent fog
+ * fonts: local desktop sans for offline use · no matching/dark palette */
+:root {
+  --font-display: "Segoe UI Variable Display", "Microsoft YaHei UI", system-ui, sans-serif;
+  --font-body: "Segoe UI Variable Text", "Microsoft YaHei UI", system-ui, sans-serif;
+  --font-mono: "Cascadia Mono", Consolas, monospace;
+  --color-paper: oklch(96% .012 75); --color-paper-2: oklch(93% .014 75);
+  --color-card: oklch(99% .004 75); --color-ink: oklch(25% .022 268);
+  --color-ink-2: oklch(36% .022 266); --color-muted: oklch(46% .018 266);
+  --color-rule: oklch(83% .014 268); --color-field-edge: oklch(64% .025 268);
+  --color-accent: oklch(77% .10 274); --color-accent-ink: oklch(22% .035 274);
+  --color-accent-hi: oklch(83% .085 274); --color-accent-deep: oklch(43% .12 274);
+  --color-accent-soft: oklch(93% .03 274); --color-focus: oklch(46% .17 274);
+  --color-apricot: oklch(83% .095 62); --color-notice: oklch(42% .10 53);
+  --color-notice-soft: oklch(95% .025 62); --color-error: oklch(42% .13 25);
+  --color-error-soft: oklch(96% .018 25); --color-success: oklch(42% .07 160);
+  --color-light: oklch(100% 0 0); --color-shade: oklch(25% .02 268);
+  --glass: oklch(98% .008 75 / .78); --glass-nav: oklch(96% .014 75 / .50);
+  --glass-panel: oklch(94% .018 268 / .36); --glass-hi: oklch(100% 0 0 / .82);
+  --glass-overlay: oklch(28% .025 268 / .3); --glass-shadow: oklch(25% .02 268 / .15);
+  --shadow-card: inset 0 1px 0 var(--glass-hi), 0 16px 48px -24px var(--glass-shadow);
+  --radius-card: 16px; --radius-inner: 8px; --radius-pill: 999px;
+  --space-2xs: 4px; --space-xs: 8px; --space-sm: 12px; --space-md: 16px;
+  --space-lg: 24px; --space-xl: 32px; --space-2xl: 48px;
+  --sidebar: 216px; --header-height: 64px; --control-height: 36px;
+  --dur-micro: 100ms; --dur-short: 160ms;
+  --border: var(--color-rule); --muted: var(--color-muted); --accent: var(--color-accent-deep); --soft: var(--color-accent-soft);
+  /* Cytoscape and xterm require sRGB values; keep their palette beside the CSS tokens. */
+  --graph-paper: #f7f5f0; --graph-ink: #29303a; --graph-muted: #7d8290;
+  --graph-cool: #575d99; --graph-accent: #a35635; --graph-ok: #326858; --graph-bad: #a13840;
+  --terminal-selection: #c8c9ed; --graph-dot: #d7d7db;
+}
