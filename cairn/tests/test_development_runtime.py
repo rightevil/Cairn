@@ -579,7 +579,8 @@ assert "CAIRN_OPERATOR_TOKEN" not in os.environ
 assert "CAIRN_WORKER_TOKEN" not in os.environ
 assert c["execution"]["role"]==w["role"]
 assert c["execution"]["worker_type"]=="claudecode"
-assert "--safe-mode" in sys.argv
+assert "--safe-mode" not in sys.argv
+assert "--strict-mcp-config" in sys.argv
 system=Path(os.environ["CAIRN_SYSTEM_PROMPT_FILE"])
 assert system.parent.name==os.environ["CAIRN_RUN_ID"]
 assert sys.argv[sys.argv.index("--system-prompt-file")+1]==str(system)

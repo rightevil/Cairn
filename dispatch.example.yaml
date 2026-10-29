@@ -8,6 +8,10 @@ runtime:
   prompt_group: development
   max_workers: 3
   max_project_workers: 3
+  # Global role limits across projects; architect reviews/arbitration use review capacity.
+  # Overrides: CAIRN_MAX_IMPLEMENTERS / CAIRN_MAX_REVIEWERS in the launcher environment.
+  max_implementers: 2
+  max_reviewers: 1
   max_running_projects: 2
   interval: 3
   healthcheck_timeout: 15

@@ -19,7 +19,9 @@ def emit(config, kind, data):
     client = CairnClient(config['server'], worker_token=config['worker_token'])
     result = client.development(config['project'], 'design/runs/'+config['run'],
         {'token':config['token'], 'id':str(uuid.uuid4()), 'kind':kind, 'data':data})
-    if not result.ok: raise RuntimeError(result.text)
+    if not result.ok:
+        from mcp.server.mcpserver.exceptions import ToolError
+        raise ToolError('Cairn rejected this update: ' + result.text)
     return result.data
 
 
@@ -31,10 +33,16 @@ def hook(config, value):
     if event == 'PreToolUse':
         name, inputs = value.get('tool_name', ''), value.get('tool_input', {})
         if config['review']:
-            allowed = review_tool_allowed(Path(config['snapshot']), directory/'reports',
+            allowed = name == 'mcp__cairn__submit_review' or review_tool_allowed(Path(config['snapshot']), directory/'reports',
                 {Path(p).resolve() for p in config['readable']}, name, inputs)
         else:
             allowed = name == 'mcp__cairn__get_context' or tool_path_allowed(Path(config['workspace']), Path(config['snapshot']), name, inputs)
+            if name == 'Skill' and inputs.get('skill', '').lstrip('/') not in ('cairn-design', 'grilling'):
+                client = CairnClient(config['server'], worker_token=config['worker_token'])
+                current = client.development(config['project'], 'design')
+                if not current.ok or not current.data['draft'].get('design_mode'):
+                    return {'hookSpecificOutput': {'hookEventName': event, 'permissionDecision': 'deny',
+                        'permissionDecisionReason': 'Ask the user to choose 快速路径 or 教练路径 first; do not default. Persist explicit chat choice with choose_design_mode or use the page buttons.'}}
         return {'hookSpecificOutput':{'hookEventName':event, 'permissionDecision':'allow' if allowed else 'deny',
             'permissionDecisionReason':'Cairn confines design artifacts and frozen review reports; no shell or source edits.'}}
     if event == 'UserPromptSubmit':
@@ -86,8 +94,21 @@ def serve(config):
     from mcp.server.mcpserver import MCPServer
     from cairn.dispatcher.design_skills import run_script
     from cairn.dispatcher.runtime.design_artifacts import export_artifacts
+    from cairn.server.design import QuestionInput
     server = MCPServer('cairn')
     workspace = Path(config['workspace'])
+    if config['review']:
+        from typing import Literal
+        from cairn.server.development_models import DevelopmentOutcome
+        @server.tool()
+        def submit_review(verdict:Literal['approve','request_changes','needs_design','reject','defer','experiment'], summary:str,
+                          within_scope:bool=True, evidence:list[str]|None=None) -> dict:
+            """登记冻结阶段的独立评审结论。summary用中文写明发现、依据、放行条件和未验证项；不是发布或开发许可。"""
+            result = DevelopmentOutcome(kind='review',verdict=verdict,summary=summary,within_scope=within_scope,evidence=evidence or [])
+            atomic_json(Path(config['directory'])/'review-result.json', result.model_dump(mode='json'))
+            return {'saved': True, 'verdict': verdict, 'notice': '评审已记录；最终确认由用户在Cairn执行。'}
+        server.run()
+        return
 
     @server.tool()
     def get_context() -> dict:
@@ -98,6 +119,11 @@ def serve(config):
         return result.data
 
     @server.tool()
+    def choose_design_mode(mode:str, quote:str, message_id:int) -> dict:
+        """Persist an explicit user choice, quick=快速路径 or coaching=教练路径. Quote their actual message; never select by default."""
+        return emit(config, 'mode', {'mode':mode,'quote':quote,'message_id':message_id})
+
+    @server.tool()
     def save_draft(version:int, stage:str, documents:dict[str,str], decisions:list[str], work:list[dict],
                    materials:dict[str,str]|None=None, decision_changes:dict[str,str]|None=None) -> dict:
         """Save native draft, never approve or publish. Work must follow context.json native_work_schema."""
@@ -106,9 +132,9 @@ def serve(config):
             'work':work,'materials':materials or {},'decision_changes':decision_changes or {}})
 
     @server.tool()
-    def ask_questions(questions:list[dict]) -> dict:
-        """Save the decision frontier, then stop and wait for explicit user answers."""
-        return emit(config,'questions',{'questions':questions})
+    def ask_questions(questions:list[QuestionInput]) -> dict:
+        """Save questions (id,text,recommendation,options,depends_on), then wait for explicit user answers."""
+        return emit(config,'questions',{'questions':[q.model_dump(mode='json') for q in questions]})
 
     @server.tool()
     def resolve_questions(answers:list[dict], message_id:int|None=None) -> dict:
@@ -126,10 +152,16 @@ def serve(config):
 if __name__ == '__main__':
     config = context()
     if sys.argv[-1] == 'hook':
+        started = time.monotonic()
+        event = {}
         try:
-            print(json.dumps(hook(config,json.load(sys.stdin)),ensure_ascii=False))
+            event = json.loads(sys.stdin.buffer.read())
+            print(json.dumps(hook(config,event),ensure_ascii=True))
         except Exception as exc:
             print('Cairn hook failed: '+str(exc),file=sys.stderr)
             sys.exit(2)
+        finally:
+            from cairn.dispatcher.runtime.terminal_metrics import record
+            record(Path(config['directory']), 'hook_'+event.get('hook_event_name','unknown'), (time.monotonic()-started)*1000)
     else:
         serve(config)

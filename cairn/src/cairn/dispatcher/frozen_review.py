@@ -51,15 +51,28 @@ async def run_review(dispatcher, project, worker, run, directory, snapshot, prom
     frozen = (context.get("subject") or {}).get("work", {}).get("result", {}).get("design_snapshot", {})
     root = Path(project.project.development.repository) / ".cairn"
     from cairn.server.design_materials import confined
+    material_paths = []
     for item in frozen.get("prepared_materials", []):
         path = confined(root, item["archive"])
         import hashlib
         if hashlib.sha256(path.read_bytes()).hexdigest() != item["sha256"]:
             raise RuntimeError("Frozen review material changed: " + item["target"])
         readable.add(path)
+        material_paths.append(path)
 
     if checks is None:
         from cairn.dispatcher.design_terminal import run_console
+        review_context = directory / 'design-review-context.json'
+        review_context.write_text(json.dumps({'subject': (context.get('subject') or {}).get('id'),
+            'frozen_design': frozen, 'effective_controls': context.get('current_controls', []),
+            'materials': [str(p) for p in material_paths],
+            'boundary': 'Review this frozen stage only; future implementation checks are not current passing evidence.'}, ensure_ascii=False), encoding='utf-8')
+        readable = {review_context.resolve(), *material_paths}
+        prompt = ('请独立评审冻结的' + str(frozen.get('stage', 'design')) + '阶段 v' + str(frozen.get('version', '?')) +
+            '。完整阅读 ' + str(review_context) + ' 中的冻结正文、附件与有效约束。先检查交付内容是否完整，'
+            '再核对本阶段的需求一致性、边界、可验证性与具体风险。仅为明确缺口补充定向检索；不要重查无关历史日志、工作索引或未来业务代码。'
+            '发现决定性的阻断项后给出证据和放行条件；批准仍须完整覆盖本阶段审查范围。'
+            '使用 submit_review 登记结论，最后用中文说明发现、依据、实际做过的检查和未验证项。评审不能修改产品决策或批准开发。')
         return await run_console(dispatcher, project, worker, run, directory, snapshot, cancellation,
             workspace=snapshot, prompt=prompt, session=session, readable=readable, review=True)
 

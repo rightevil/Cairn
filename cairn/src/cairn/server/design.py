@@ -38,12 +38,15 @@ CREATE TABLE IF NOT EXISTS design_inputs (
 """
 
 
-class Question(DevelopmentModel):
+class QuestionInput(DevelopmentModel):
     id: str = Field(min_length=1)
     text: str = Field(min_length=1)
     recommendation: str = ""
     options: list[str] = []
     depends_on: list[str] = []
+
+
+class Question(QuestionInput):
     answer: str | None = None
     answer_message_id: int | None = None
     asked_after: int = 0
@@ -51,6 +54,8 @@ class Question(DevelopmentModel):
 
 class Draft(DevelopmentModel):
     version: int = 0
+    design_mode: Literal['quick', 'coaching'] | None = None
+    design_mode_message_id: int = 0
     stage: Literal["brief", "requirements", "ux", "architecture", "plan"] = "brief"
     documents: dict[str, str] = {}
     document_sources: dict[str, str] = {}
@@ -84,7 +89,7 @@ class InputDelivery(DevelopmentModel):
 class AgentUpdate(DevelopmentModel):
     token: str
     id: str = Field(min_length=1, max_length=200)
-    kind: Literal["text", "activity", "commands", "session", "draft", "questions", "answers"]
+    kind: Literal["text", "activity", "commands", "session", "draft", "questions", "answers", "mode"]
     data: dict
 
 
@@ -160,7 +165,8 @@ def review_state(conn, project_id, draft):
             "digest": author.result["design_candidate"], "current": current, "work_state": value.state,
             "summary": draft.candidate.get("summary", "") if current else output.get("summary", ""),
             "verdict": draft.candidate.get("review", "pending") if current else output.get("verdict"),
-            "checkpoint": value.checkpoint, "retry_at": value.retry_at, "run": run, "attempts": len(runs), "revision": revision, "changes": changes}
+            "checkpoint": value.checkpoint, "retry_at": value.retry_at, "run": run, "attempts": len(runs), "revision": revision, "changes": changes,
+            "comparison": {"from_version": frozen.get('version'), "to_version": draft.version}}
 
 
 @router.get("", dependencies=[Depends(require_reader)])
@@ -261,6 +267,50 @@ def readiness(conn, project_id, draft):
         "closeable_run":closeable,"ready_for_close":bool(closeable and not (set(issues)-deferred))}
 
 
+@router.post('/connect', dependencies=[Depends(require_operator)])
+def connect(project_id: str):
+    from cairn.server.development_workflow import all_work
+    with get_conn() as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        config = store.project(conn, project_id, active=True)
+        if config.phase != 'design': raise HTTPException(409, 'Only design projects open a design terminal')
+        if load(conn, project_id).candidate: return {'state': 'frozen'}
+        active = next((iid for iid, w in all_work(conn, project_id) if w.purpose == 'design'
+            and w.state in ('ready', 'running') and not w.result.get('input_closed')), None)
+        if active: return {'intent_id': active, 'state': 'connecting'}
+        for iid, work in all_work(conn, project_id):
+            if work.purpose == 'design' and work.state == 'waiting':
+                work.state = 'superseded'; store.save_work(conn, project_id, iid, work)
+        iid = store.add_intent(conn, project_id, 'Open design terminal', WorkPackage(role='planner', purpose='design',
+            revision=config.revision, result={'connect': True}))
+        conn.execute("UPDATE design_inputs SET intent_id=?,run_id=NULL WHERE project_id=? AND state='queued'", (iid, project_id))
+        return {'intent_id': iid, 'state': 'queued'}
+
+
+class ModeSelection(DevelopmentModel):
+    version: int
+    mode: Literal['quick', 'coaching']
+
+
+@router.post('/mode', dependencies=[Depends(require_operator)])
+def choose_mode(project_id: str, body: ModeSelection):
+    with get_conn() as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        config = store.project(conn, project_id, active=True)
+        draft = load(conn, project_id)
+        if config.phase != 'design' or draft.candidate or draft.version != body.version:
+            raise HTTPException(409, 'Design version or phase changed')
+        draft.design_mode = body.mode; draft.version += 1
+        save(conn, project_id, draft)
+        mid = record(conn, project_id, 'mode:' + str(draft.version), 'user', {'content': '选择设计方式：' + ('快速路径' if body.mode == 'quick' else '教练路径'), 'answers': {}})
+        draft.design_mode_message_id = mid; save(conn, project_id, draft)
+        from cairn.server.development_workflow import all_work
+        active = next((iid for iid,w in all_work(conn, project_id) if w.purpose == 'design' and w.state in ('ready','running') and not w.result.get('input_closed')), None)
+        if active:
+            conn.execute('INSERT INTO design_inputs(message_id,project_id,intent_id) VALUES(?,?,?)', (mid, project_id, active))
+        return draft
+
+
 @router.post("/messages", dependencies=[Depends(require_operator)], status_code=201)
 def send(project_id: str, body: Message):
     with get_conn() as conn:
@@ -308,7 +358,7 @@ def send(project_id: str, body: Message):
         if body.answers and remaining:
             return {"id": mid, "intent_id": None, "remaining_questions": remaining}
         active = next(((iid, w) for iid, w in reversed(all_work(conn, project_id)) if w.purpose == "design"
-                       and w.state in ("ready", "running", "implemented") and not w.result.get("input_closed")), None)
+                       and w.state in ("ready", "running") and not w.result.get("input_closed")), None)
         intent = active[0] if active else store.add_intent(conn, project_id, "Design conversation", WorkPackage(
             role="planner", purpose="design", revision=config.revision, result={"message_id": mid}))
         conn.execute("INSERT INTO design_inputs(message_id,project_id,intent_id) VALUES(?,?,?)", (mid, project_id, intent))
@@ -338,7 +388,7 @@ def inputs(project_id: str, run_id: str, body: InputDelivery):
                 conn.execute("UPDATE design_inputs SET state='delivered' WHERE project_id=? AND intent_id=? AND run_id=? AND message_id=? AND state='sending'",
                              (project_id, run["intent_id"], run_id, mid))
             return {"items": []}
-        initial = value.result["message_id"]
+        initial = value.result.get("message_id")
         if body.action == "start":
             conn.execute("UPDATE design_inputs SET state='sending',run_id=? WHERE project_id=? AND intent_id=? AND message_id=? AND state='queued'",
                          (run_id, project_id, run["intent_id"], initial))
@@ -386,7 +436,21 @@ def update(project_id: str, run_id: str, body: AgentUpdate):
         if prior:
             return {"id": record(conn, project_id, event_key, body.kind, body.data)}
         draft = load(conn, project_id)
-        if body.kind == "draft":
+        if body.kind == 'mode':
+            message = conn.execute("SELECT data FROM design_messages WHERE project_id=? AND id=? AND kind='user'", (project_id, body.data.get('message_id'))).fetchone()
+            mode, quote = body.data.get('mode'), body.data.get('quote', '')
+            label = {'quick': '快速路径', 'coaching': '教练路径'}.get(mode) if isinstance(mode,str) else None
+            explicit = label and isinstance(quote,str) and re.fullmatch(r'(?:我)?(?:选择|选|采用|使用|用|切换到|改为)?' + label, quote.strip('。！! '))
+            clauses = [clause.strip() for clause in re.split(r'[,，。！？!?;；\n]',json.loads(message['data']).get('content',''))] if message else []
+            if not message or not explicit or quote.strip('。！! ') not in clauses:
+                raise HTTPException(422, 'Design mode needs an exact explicit user quote and message_id')
+            if body.data['message_id'] <= draft.design_mode_message_id:
+                raise HTTPException(409, 'A newer explicit design mode choice already exists')
+            if draft.candidate: raise HTTPException(409, 'Reopen the candidate first')
+            draft.design_mode = mode; draft.design_mode_message_id = body.data['message_id']; draft.version += 1
+        elif body.kind == "draft":
+            if value.result.get('connect') and not draft.design_mode:
+                raise HTTPException(409, 'Choose a design mode before drafting')
             if body.data.get("version") != draft.version or draft.candidate:
                 raise HTTPException(409, "Draft version changed; reload before saving")
             if value.result.get("revision_feedback") and "decisions" in body.data:
@@ -398,7 +462,7 @@ def update(project_id: str, run_id: str, body: AgentUpdate):
                     raise HTTPException(422, "Expected confirmed decision to question ID mappings")
                 for decision in removed:
                     question = next((q for q in draft.questions if q.id == approvals.get(decision)), None)
-                    if not question or question.answer is None or (question.answer_message_id or 0) <= value.result["message_id"]:
+                    if not question or question.answer is None or (question.answer_message_id or 0) <= value.result.get("message_id", 0):
                         raise HTTPException(409, "Changing a confirmed decision requires a new explicit user answer: " + decision)
             fields = {k: body.data[k] for k in ("stage", "documents", "decisions", "work", "materials") if k in body.data}
             draft = validated(Draft, {**draft.model_dump(), **fields, "version": draft.version + 1,
@@ -420,8 +484,8 @@ def update(project_id: str, run_id: str, body: AgentUpdate):
             draft.questions.extend(incoming)
             draft.version += 1
         elif body.kind == "answers":
-            input_id = body.data.get("message_id", value.result["message_id"])
-            if input_id != value.result["message_id"] and not conn.execute(
+            input_id = body.data.get("message_id", value.result.get("message_id"))
+            if input_id != value.result.get("message_id") and not conn.execute(
                 "SELECT 1 FROM design_inputs WHERE project_id=? AND message_id=? AND run_id=? AND state='delivered'",
                 (project_id, input_id, run_id)).fetchone():
                 raise HTTPException(409, "Answer source must be a delivered input in this session")
@@ -461,6 +525,8 @@ def update(project_id: str, run_id: str, body: AgentUpdate):
 
 def digest(draft):
     payload = draft.model_dump(exclude={"candidate", "releases", "commands", "session"})
+    if payload['design_mode'] is None: payload.pop('design_mode')
+    if not payload['design_mode_message_id']: payload.pop('design_mode_message_id')
     for field in ("materials", "prepared_materials"):
         if not payload[field]:
             payload.pop(field)  # Preserve hashes of candidates frozen before material packaging existed.

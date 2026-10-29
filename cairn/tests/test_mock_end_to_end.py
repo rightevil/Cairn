@@ -252,6 +252,7 @@ def _loop(config: DispatchConfig, client: InProcessClient, containers: LocalCont
     loop.client = client
     loop.container_manager = containers
     loop.executor = ThreadPoolExecutor(max_workers=config.runtime.max_workers)
+    loop.design_executor = ThreadPoolExecutor(max_workers=config.runtime.max_running_projects)
     loop.cleanup_executor = ThreadPoolExecutor(max_workers=1)
     loop.futures = {}
     loop.cleanup_futures = {}

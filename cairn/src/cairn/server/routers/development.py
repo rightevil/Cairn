@@ -195,7 +195,7 @@ def evidence(project_id: str, run_id: str, index: int):
 
 
 @router.get("/runs/{run_id}/stream/{channel}", dependencies=[Depends(require_reader)])
-def stream(project_id: str, run_id: str, channel: str):
+def stream(project_id: str, run_id: str, channel: str, tail: int = Query(default=2_000_000, ge=1024, le=2_000_000)):
     from fastapi.responses import PlainTextResponse
     if channel not in ("stdout", "stderr"):
         raise HTTPException(404, "Unknown stream")
@@ -211,8 +211,8 @@ def stream(project_id: str, run_id: str, channel: str):
             raise HTTPException(404, "No output yet")
         with path.open("rb") as source:
             size = path.stat().st_size
-            source.seek(max(0, size - 2_000_000))
-            text = source.read(2_000_000).decode("utf-8", errors="replace")
+            source.seek(max(0, size - tail))
+            text = source.read(tail).decode("utf-8", errors="replace")
         return PlainTextResponse("[Live output; not acceptance evidence]\n" + text)
 
 

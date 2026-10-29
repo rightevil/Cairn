@@ -40,7 +40,8 @@ def test_claude_development_execute_and_resume_share_cairn_system_contract(tmp_p
     driver = ClaudeCodeDriver()
     for argv in (driver.build_execute(role, "task", "session-1").argv,
                  driver.build_conclude(role, "continue", "session-1")):
-        assert "--safe-mode" in argv
+        assert "--safe-mode" not in argv, 'Safe mode disables the owned workspace hooks and collaboration MCP'
+        assert '--strict-mcp-config' in argv and '--disable-slash-commands' in argv
         assert argv[argv.index("--setting-sources") + 1] == ""
         assert argv[argv.index("--system-prompt-file") + 1] == str(prompt)
         assert argv[argv.index("--append-subagent-system-prompt-file") + 1] == str(prompt)

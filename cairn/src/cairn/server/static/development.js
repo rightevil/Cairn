@@ -8,6 +8,55 @@ function developmentFeatures() {
     controlSending: false,
     developmentArtifact: { open: false, name: '', text: '' },
     taskActivity: { intent: '', runs: [], next: null }, taskActivityLoading: false, taskActivityRequest: 0,
+    taskDetailTab: 'activity', activeTaskRun: '', taskRunText: '', taskRunError: '', taskRunLoading: false,
+    collaboration: [], collaborationError: '', collaborationProject: '',
+
+    async loadCollaboration(id) {
+      if (this.collaborationProject !== id) { this.collaboration = []; this.collaborationProject = id; }
+      try {
+        const result = await this.api('GET', `/projects/${id}/development/collaboration`);
+        if (this.selectedProjectId !== id) return;
+        this.collaboration = result.items; this.collaborationError = '';
+      } catch (e) { if (this.selectedProjectId === id) this.collaborationError = e.message; }
+    },
+    taskContributions() {
+      const id = this.selectedIntent()?.id;
+      return this.collaboration.filter(m => !id || m.task_id === id || m.recipient === id || !m.recipient);
+    },
+    contributionLabel(kind) {
+      return {message:'协作消息',handoff:'候选交接',blocker:'阻塞报告',change_request:'变更提议'}[kind] || kind;
+    },
+    taskName(id) { const task = this.project?.intents?.find(i => i.id === id); return task?.work?.key || id; },
+    taskRunEntriesInline() { return agentOutput(this.taskRunText || '').filter(e => e.kind === 'tool' || e.text?.trim()); },
+    async selectTaskRun(run) {
+      this.activeTaskRun = run.id; this.taskRunText = ''; this.taskRunError = '';
+      await this.refreshTaskActivity();
+    },
+    async refreshTaskActivity() {
+      const run = this.selectedRuns().find(r => r.id === this.activeTaskRun);
+      if (!run || this.taskRunLoading || this.sideTab !== 'development') return;
+      const projectId = this.selectedProjectId, taskId = this.selection?.id;
+      this.taskRunLoading = true;
+      try {
+        const response = await fetch(`/projects/${projectId}/development/runs/${run.id}/stream/stdout?tail=262144`);
+        if (!response.ok) throw new Error('过程输出尚未就绪；可先查看状态与验收证据');
+        const text = await response.text();
+        if (this.selectedProjectId !== projectId || this.selection?.id !== taskId || this.activeTaskRun !== run.id) return;
+        this.taskRunText = text; this.taskRunError = '';
+      } catch (e) {
+        if (this.selectedProjectId === projectId && this.activeTaskRun === run.id) this.taskRunError = e.message;
+      } finally { this.taskRunLoading = false; }
+    },
+    taskPipeline() {
+      const work = this.selectedIntent()?.work;
+      if (!work) return [];
+      const states = ['ready','running','implemented','reviewing','approved','merged','verified'];
+      const position = states.indexOf(work.state);
+      return [{label:'实施',done:position >= 2,active:work.state === 'running'},
+        {label:'独立审核',done:position >= 4,active:work.state === 'reviewing'},
+        {label:'集成',done:position >= 5,active:work.state === 'approved'},
+        {label:'验证',done:work.state === 'verified',active:work.state === 'merged'}];
+    },
 
     async loadDevelopment(id) {
       this.developmentNow = Date.now();
@@ -21,6 +70,10 @@ function developmentFeatures() {
         if (this.selectedProjectId !== id) return;
         const selected = this.selectedAgentSession();
         this.developmentState = result;
+        if (this.sideTab === 'development') {
+          await this.loadCollaboration(id);
+          if (this.selection?.kind === 'intent') await this.loadTaskActivity(this.selection.id);
+        }
         if (this.developmentArtifact.conversation && this.developmentArtifact.projectId === id) {
           const latest = result.runs.find(r => r.id === this.developmentArtifact.run.id);
           if (latest) this.developmentArtifact.run = latest;
@@ -40,7 +93,7 @@ function developmentFeatures() {
     },
 
     visibleWork() {
-      return this.developmentWork().filter(i => this.taskFilter === 'active' ? ['running','implemented','reviewing','approved','merged'].includes(i.work.state)
+      return this.developmentWork().filter(i => this.graphHistory || ['implementer','planner'].includes(i.work.role)).filter(i => this.taskFilter === 'active' ? ['running','implemented','reviewing','approved','merged'].includes(i.work.state)
         : this.taskFilter === 'waiting' ? i.work.state === 'waiting' || i.work.state === 'ready' && (i.work.dependencies || []).some(id => this.project.intents.find(d => d.id === id)?.work?.state !== 'verified')
         : this.taskFilter === 'verified' ? i.work.state === 'verified' : true);
     },
@@ -69,6 +122,8 @@ function developmentFeatures() {
         const result = await this.api('GET', `/projects/${projectId}/development/intents/${id}/activity${suffix}`);
         if (this.selectedProjectId !== projectId || this.selection?.id !== id || this.taskActivityRequest !== request) return;
         this.taskActivity = {intent:id, runs:more ? [...this.taskActivity.runs,...result.runs] : result.runs, next:result.next};
+        if (!this.taskActivity.runs.some(r => r.id === this.activeTaskRun)) this.activeTaskRun = this.taskActivity.runs[0]?.id || '';
+        if (this.taskDetailTab === 'activity') await this.refreshTaskActivity();
       } catch (e) { if (this.selectedProjectId === projectId && this.taskActivityRequest === request) this.developmentError = e.message; }
       finally { if (this.taskActivityRequest === request) this.taskActivityLoading = false; }
     },

@@ -44,7 +44,9 @@ class ClaudeCodeDriver(SeedSessionDriver):
             return []
         prompt = worker.env.get("CAIRN_SYSTEM_PROMPT_FILE") or str(
             resources.files("cairn.dispatcher.prompts").joinpath("development", "system.md"))
-        return ["--safe-mode", "--setting-sources", "", "--system-prompt-file", prompt,
+        settings = ["--settings", worker.env['CAIRN_WORKSPACE_SETTINGS']] if worker.env.get('CAIRN_WORKSPACE_SETTINGS') else []
+        return [*settings, "--setting-sources", "", "--strict-mcp-config", "--disable-slash-commands",
+                "--tools", "Read,Glob,Grep,Write,Edit,Bash,WebSearch,WebFetch", "--system-prompt-file", prompt,
                 "--append-subagent-system-prompt-file", prompt, "--system-prompt-snapshot", "off",
                 "--output-format", "stream-json", "--verbose"]
 

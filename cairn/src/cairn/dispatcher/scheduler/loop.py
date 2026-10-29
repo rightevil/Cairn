@@ -57,6 +57,7 @@ class DispatcherLoop:
             assert self.config.container is not None
             self.container_manager = ContainerManager(self.config.container)
         self.executor = ThreadPoolExecutor(max_workers=self.config.runtime.max_workers)
+        self.design_executor = ThreadPoolExecutor(max_workers=self.config.runtime.max_running_projects)
         self.cleanup_executor = ThreadPoolExecutor(max_workers=max(1, min(8, self.config.runtime.max_workers)))
         self.futures: dict[Future[str], RunningTask] = {}
         self.cleanup_futures: dict[Future[bool], tuple[str, str | None, str | None]] = {}
@@ -79,6 +80,7 @@ class DispatcherLoop:
                 sorted({task.project_id for task in self.futures.values()}),
             )
         self.executor.shutdown(wait=True)
+        self.design_executor.shutdown(wait=True)
         self.cleanup_executor.shutdown(wait=True)
         self.container_manager.close()
         self.client.close()
@@ -226,12 +228,12 @@ class DispatcherLoop:
         )
 
         dispatched = True
-        while dispatched and len(self.futures) < self.config.runtime.max_workers:
+        while dispatched and self._active_task_count() < self.config.runtime.max_workers:
             dispatched = False
             for summary in running_projects:
                 if self._try_dispatch_project(summary):
                     dispatched = True
-                    if len(self.futures) >= self.config.runtime.max_workers:
+                    if self._active_task_count() >= self.config.runtime.max_workers:
                         return
             if dispatched:
                 continue
@@ -630,11 +632,15 @@ class DispatcherLoop:
     def _worker_counts(self) -> dict[str, int]:
         counts: dict[str, int] = {}
         for task in self.futures.values():
+            if task.task_type == 'development.design': continue
             counts[task.worker_name] = counts.get(task.worker_name, 0) + 1
         return counts
 
+    def _active_task_count(self):
+        return sum(task.task_type != 'development.design' for task in self.futures.values())
+
     def _project_running_task_count(self, project_id: str) -> int:
-        return sum(1 for task in self.futures.values() if task.project_id == project_id)
+        return sum(1 for task in self.futures.values() if task.project_id == project_id and task.task_type != 'development.design')
 
     def _project_running_task_summary(self, project_id: str) -> list[str]:
         summary: list[str] = []

@@ -31,6 +31,22 @@ CREATE TABLE IF NOT EXISTS development_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     kind TEXT NOT NULL, subject TEXT NOT NULL, detail TEXT NOT NULL, created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS collaboration (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    task_id TEXT NOT NULL, recipient TEXT, client_id TEXT NOT NULL,
+    kind TEXT NOT NULL, content TEXT NOT NULL, reference TEXT NOT NULL, version TEXT NOT NULL,
+    design_revision INTEGER NOT NULL, created_at TEXT NOT NULL,
+    UNIQUE(run_id, client_id),
+    FOREIGN KEY(task_id,project_id) REFERENCES intents(id,project_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS collaboration_project ON collaboration(project_id,id);
+CREATE TABLE IF NOT EXISTS collaboration_receipts (
+    message_id INTEGER NOT NULL REFERENCES collaboration(id) ON DELETE CASCADE,
+    task_id TEXT NOT NULL, run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    acknowledged_at TEXT NOT NULL, PRIMARY KEY(message_id,task_id)
+);
 """
 
 

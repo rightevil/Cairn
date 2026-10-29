@@ -18,6 +18,13 @@ is approval. Only Cairn's operator publish action approves a frozen version.
 
 Read the supplied native draft and conversation. Continue its current stage:
 
+First read current state using get_context. If draft.design_mode is unset, ask the user
+to choose 快速路径 (complete the brief in one pass and label reversible assumptions)
+or 教练路径 (work section by section with deeper questions). Neither is a default.
+Do not start a BMAD workflow until a choice is persisted. The page offers both buttons;
+for an explicit chat choice use choose_design_mode with its exact quote and message_id.
+Honor the saved choice on resume; switching also requires explicit user intent.
+
 | Stage | Invoke the actual installed Skill |
 |---|---|
 | brief | bmad-product-brief |

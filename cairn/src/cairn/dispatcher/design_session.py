@@ -24,7 +24,7 @@ def tool_path_allowed(workspace: Path, snapshot: Path, tool: str, inputs: dict):
         return any(target.is_relative_to(root.resolve()) for root in (workspace, snapshot))
     if tool == "Skill":
         return inputs.get("skill", "").lstrip("/") in {*BMAD_SKILLS, "cairn-design", "grilling"}
-    return tool in ("WebSearch", "WebFetch") or tool in ("mcp__cairn__save_draft", "mcp__cairn__ask_questions", "mcp__cairn__resolve_questions", "mcp__cairn__bmad_script")
+    return tool in ("WebSearch", "WebFetch") or tool in ("mcp__cairn__save_draft", "mcp__cairn__ask_questions", "mcp__cairn__resolve_questions", "mcp__cairn__bmad_script", "mcp__cairn__choose_design_mode")
 
 
 async def run_turn(dispatcher, project, intent, worker, run, directory, snapshot, cancellation):
@@ -34,7 +34,8 @@ async def run_turn(dispatcher, project, intent, worker, run, directory, snapshot
     workspace.mkdir(parents=True, exist_ok=True)
     await asyncio.to_thread(prepare, workspace, dispatcher.config.design)
     repository = Path(project.project.development.repository)
-    state = dispatcher.call(pid, "design?input_id=" + str(intent.work.result["message_id"]))
+    message_id = intent.work.result.get('message_id')
+    state = dispatcher.call(pid, 'design' + ('?input_id=' + str(message_id) if message_id else ''))
     draft = state["draft"]
     baseline = git(snapshot, "rev-parse", "HEAD")
     if draft["baseline"] and draft["baseline"] != baseline:
@@ -46,13 +47,13 @@ async def run_turn(dispatcher, project, intent, worker, run, directory, snapshot
         "conversation":[m for m in state["messages"] if m["kind"] in ("user","text","questions")],
         "native_work_schema":PlannedWork.model_json_schema()}
     (workspace/"context.json").write_text(json.dumps(context,ensure_ascii=False),encoding="utf-8")
-    user = next(m for m in state["messages"] if m["id"]==intent.work.result["message_id"])
-    prompt = user["data"]["content"] + "\nRead context.json and use cairn-design and installed BMAD/grilling skills. Save meaningful changes via Cairn tools."
+    user = next((m for m in state["messages"] if m["id"] == message_id), None)
+    prompt = user["data"]["content"] + "\nRead context.json and use cairn-design and installed BMAD/grilling skills. Save meaningful changes via Cairn tools." if user else None
     dispatcher.call(pid,f"design/runs/{run['id']}",{"token":run["token"],"id":"session","kind":"session","data":{"session":session,"baseline":baseline}})
     dispatcher.call(pid,f"design/runs/{run['id']}/inputs",{"token":run["token"],"action":"start","message_ids":[]})
     try:
         await run_console(dispatcher,project,worker,run,directory,snapshot,cancellation,
-            workspace=workspace,prompt=prompt,session=session,message_id=user["id"])
+            workspace=workspace,prompt=prompt,session=session,message_id=message_id)
     finally:
         await asyncio.to_thread(export_artifacts,workspace/"artifacts",repository)
     return {"kind":"design","summary":"Design saved; terminal closed for candidate review"},session

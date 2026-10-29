@@ -30,7 +30,9 @@ def test_native_terminal_local_auth_ownership_input_and_idle_close(http,reposito
         with browser.websocket_connect("ws://127.0.0.1"+endpoint,headers={'origin':'http://evil.example'}):pass
     with browser.websocket_connect("ws://127.0.0.1"+endpoint,headers={'origin':'http://127.0.0.1'}) as ws:
         assert ws.receive_json()=={'type':'ready','readonly':False}
-        assert ws.receive_json()['data']=='Native CLI output'
+        output = ws.receive_json()
+        assert output['data']=='Native CLI output'
+        ws.send_json({'type':'ack','seq':output['seq']})
         with browser.websocket_connect("ws://127.0.0.1"+endpoint) as viewer:
             assert viewer.receive_json()['readonly'] is True
         ws.send_json({'type':'input','data':'Direction\r'})
@@ -45,5 +47,10 @@ def test_native_terminal_local_auth_ownership_input_and_idle_close(http,reposito
         assert http.post(endpoint+'/close',headers=OPERATOR,json={}).status_code==409
         (directory/'terminal-state.json').write_text(json.dumps({'state':'idle','time':time.time()+1}))
         assert http.post(endpoint+'/close',headers=OPERATOR,json={}).status_code==200
+        late=http.post(url(project,'/messages'),headers=OPERATOR,json={'id':'after-close','content':'Keep this for the next conversation'})
+        assert late.status_code == 201 and late.json()['intent_id'] != intent
+        assert http.post(endpoint+'/input',headers=WORKER,json={**payload,'key':'after-close-native'}).status_code == 409
+        stats=http.get(endpoint+'/metrics',headers=OPERATOR).json()
+        assert stats['samples']['server_to_paint_ack']['count'] >= 1
     assert 'Direction' in http.get(url(project),headers=OPERATOR).text
     assert any(json.loads(line)['type']=='close' for line in (directory/'terminal-input.jsonl').read_text().splitlines())

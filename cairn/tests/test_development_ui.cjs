@@ -11,6 +11,19 @@ vm.runInContext(fs.readFileSync(path.join(root, 'design.js'), 'utf8'), context);
 const html = fs.readFileSync(path.join(root, 'index.html'), 'utf8');
 vm.runInContext(fs.readFileSync(path.join(root, 'workspace.js'), 'utf8'), context);
 const app = context.cairnApp();
+assert.equal(app.panelOpen,false,'Keep the canvas unobstructed until a node is selected');
+app.terminalStates['design-main']='idle';
+assert.equal(app.sessionStatus({state:'running',runs:[{id:'design-main',state:'running'}]}),'idle');
+assert.equal(app.sessionStatus({state:'success',runs:[{state:'success'}]}),'ended');
+app.designDraft.stage_reviews=[{stage:'brief',review:'approve'}];
+assert.equal(app.designStages()[0].passed,true);
+assert.equal(app.designStages()[1].passed,false);
+app.collaboration=[{task_id:'source',recipient:'target'},{task_id:'other',recipient:null},{task_id:'other',recipient:'unrelated'}];
+const originalSelected=app.selectedIntent; app.selectedIntent=()=>({id:'target',work:{state:'reviewing'}});
+assert.equal(app.taskContributions().length,2);
+assert.equal(app.taskPipeline()[1].active,true);
+assert.equal(app.taskPipeline()[0].done,true);
+app.selectedIntent=originalSelected;
 app.designReceive({ id: 1, kind: 'user', data: { content: 'Start designing' } });
 app.designReceive({ id: 2, kind: 'text', data: { block: 'one', text: 'Hello' } });
 app.designReceive({ id: 2, kind: 'text', data: { block: 'one', text: 'Hello' } });
@@ -99,7 +112,7 @@ assert.equal(app.developmentRunStatus({ ...run, pid: null }), '准备工作区�
 assert.equal(app.developmentRunStatus({ ...run, pid: null, role: 'integration' }), '合并与集成验证中');
 assert.equal(app.developmentRunStatus({ ...run, state: 'cancelled' }), '已取消');
 assert(app.developmentTime(run.started_at).includes('41:09'));
-assert(html.includes('最近心跳：') && html.includes('当前 Worker（'));
+assert(html.includes('最近心跳：') && html.includes('正在推进的任务'));
 assert(html.includes('run.worker') && html.includes('run.pid'));
 assert(!html.includes('formatTimelineDate(run.started_at)'));
 console.log('Development UI checks passed: revision phase, live workers, stop/stale/startup states and full timestamps');
@@ -286,6 +299,10 @@ taskView.developmentState.sessions=[
 assert.equal(taskView.projectSessions().length,2,'Development sessions live in task details, not the project sidebar');
 
 (async () => {
+  const terminalView=context.cairnApp();
+  terminalView.developmentState.sessions=[{key:'main',main:true,runs:[{id:'native',streams:{terminal:'record',stdout:'record'}}]}];
+  terminalView.$refs=new Proxy({}, {get(){throw new Error('Native PTY must not poll legacy transcript output');}});
+  await terminalView.loadAgentConversation();
   const historyView=context.cairnApp();
   historyView.selectedProjectId='project';historyView.selection={kind:'intent',id:'a'};
   const pending={};historyView.api=async (method,url)=>new Promise(resolve=>{pending[url.includes('/a/')?'a':'b']=resolve;});

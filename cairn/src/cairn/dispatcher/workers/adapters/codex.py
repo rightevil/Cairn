@@ -38,7 +38,9 @@ class CodexDriver(RegexSessionDriver):
 
     def _options(self, worker: WorkerConfig) -> list[str]:
         env = worker.env
-        options = ["--dangerously-bypass-approvals-and-sandbox"]
+        roots = env.get('CAIRN_WRITABLE_ROOTS')
+        options = (["--sandbox", "workspace-write", "-c", 'approval_policy="never"',
+                    "-c", 'sandbox_workspace_write.writable_roots=' + roots] if roots else ["--dangerously-bypass-approvals-and-sandbox"])
         if worker.roles:
             options.append("--json")
         if env.get("CODEX_MODEL"):

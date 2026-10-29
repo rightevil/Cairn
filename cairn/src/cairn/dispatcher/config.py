@@ -176,6 +176,8 @@ class RuntimeConfig(BaseModel):
     max_workers: int = Field(gt=0)
     max_running_projects: int = Field(gt=0)
     max_project_workers: int = Field(gt=0)
+    max_implementers: int | None = Field(default=None, gt=0)
+    max_reviewers: int | None = Field(default=None, gt=0)
     interval: int = Field(gt=0)
     healthcheck_timeout: int = Field(gt=0)
     worker_healthcheck: WorkerHealthcheckMode = "startup_only"
@@ -309,6 +311,9 @@ class DispatchConfig(BaseModel):
     @classmethod
     def load(cls, path: Path) -> "DispatchConfig":
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        for name in ('max_implementers','max_reviewers'):
+            value = os.environ.get('CAIRN_' + name.upper())
+            if value: data.setdefault('runtime', {})[name] = value
         config = cls.model_validate(data)
         if config.local and config.local.workspace_root:
             root = Path(config.local.workspace_root).expanduser()

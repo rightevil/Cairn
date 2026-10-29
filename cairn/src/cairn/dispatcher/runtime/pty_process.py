@@ -10,6 +10,7 @@ class ConsoleProcess:
     def __init__(self, argv, cwd, env, rows=32, cols=110):
         self.job = None
         self.tail = ""
+        self.ready = False
         self.decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
         if os.name == "nt":
             from winpty import PtyProcess
@@ -60,6 +61,7 @@ class ConsoleProcess:
         for match in re.finditer(pattern, text):
             if match.end() <= boundary: continue
             query = match[0]
+            if query.endswith('6n'): self.ready = True
             answer = ("\x1b[1;1R" if query.endswith("6n") else "\x1b[>0;0;0c" if ">" in query
                       else "\x1b[?1;2c" if query.endswith("c") else
                       "\x1b]" + ("10;rgb:2929/3030/3a3a" if "]10;" in query else "11;rgb:f7f7/f5f5/f0f0") + "\x1b\\")

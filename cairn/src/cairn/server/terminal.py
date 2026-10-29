@@ -9,7 +9,7 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
-from cairn.server.access import require_operator, require_worker, local_browser
+from cairn.server.access import require_operator, require_worker, require_reader, local_browser
 from cairn.server.db import get_conn
 from cairn.server import development_store as store
 
@@ -42,7 +42,26 @@ def append_control(directory, value):
     target = directory / "terminal-input.jsonl"
     if target.is_symlink(): raise HTTPException(403, "Invalid terminal input path")
     with target.open("a", encoding="utf-8") as output:
-        output.write(json.dumps(value, ensure_ascii=False)+"\n")
+        output.write(json.dumps({**value,'created_at':time.time()}, ensure_ascii=False)+"\n")
+
+
+@router.get('/terminal/metrics', dependencies=[Depends(require_reader)])
+def metrics(project_id: str, run_id: str):
+    with get_conn() as conn:
+        _, path, _ = terminal_files(conn, project_id, run_id)
+    source = path.parent/'terminal-metrics.jsonl'
+    values = {}
+    if source.is_file():
+        with source.open('rb') as stream:
+            stream.seek(max(0,source.stat().st_size-128000))
+            for line in stream:
+                try:
+                    item = json.loads(line)
+                    values.setdefault(item['event'],[]).append(float(item['ms']))
+                except (ValueError,KeyError,TypeError): continue
+    return {'samples':{event:{'count':len(items),'median_ms':sorted(items)[len(items)//2],
+        'p95_ms':sorted(items)[min(len(items)-1,int(len(items)*.95))]} for event,items in values.items()},
+        'scope':'Recent transport/hook measurements only; not model generation or gateway latency.'}
 
 
 class NativeInput(BaseModel):
@@ -60,7 +79,7 @@ def native_input(project_id: str, run_id: str, body: NativeInput):
         conn.execute("BEGIN IMMEDIATE")
         row = live_run(conn, project_id, run_id, body.token)
         _, path, work = terminal_files(conn, project_id, run_id)
-        if work.purpose != "design" or row["cancel_requested"] or load(conn, project_id).candidate.get('digest'):
+        if work.purpose != "design" or work.result.get('input_closed') or row["cancel_requested"] or load(conn, project_id).candidate.get('digest'):
             raise HTTPException(409, "Design input lease is closed")
         prior = conn.execute("SELECT id FROM design_messages WHERE project_id=? AND key=?", (project_id, body.key)).fetchone()
         if prior:
@@ -80,8 +99,10 @@ def native_input(project_id: str, run_id: str, body: NativeInput):
 @router.post("/terminal/close", dependencies=[Depends(require_operator)])
 def close_terminal(project_id: str, run_id: str):
     with get_conn() as conn:
-        row, path, _ = terminal_files(conn, project_id, run_id)
+        conn.execute('BEGIN IMMEDIATE')
+        row, path, work = terminal_files(conn, project_id, run_id)
         if row["state"] != "running": return {"closing":False}
+        if work.result.get('input_closed'): return {'closing':True}
         state_file = path.parent / "terminal-state.json"
         state = json.loads(state_file.read_text(encoding="utf-8")) if state_file.is_file() else {}
         pending = conn.execute("SELECT 1 FROM design_inputs WHERE project_id=? AND intent_id=? AND state IN ('queued','sending')", (project_id, row['intent_id'])).fetchone()
@@ -89,6 +110,8 @@ def close_terminal(project_id: str, run_id: str):
         ticket = json.loads(ticket_file.read_text(encoding="utf-8")) if ticket_file.is_file() else {}
         if state.get("state") != "idle" or pending or ticket.get("time",0)>state.get("time",0):
             raise HTTPException(409, "请等待设计 Agent 完成本轮并保存方案")
+        work.result['input_closed'] = True
+        store.save_work(conn,project_id,row['intent_id'],work)
         append_control(path.parent, {"type":"close"})
         return {"closing":True}
 
@@ -108,17 +131,21 @@ async def attach_terminal(websocket: WebSocket, project_id: str, run_id: str):
     owner = owners.setdefault(run_id, websocket)
     readonly = work.purpose != "design" or row["state"] != "running" or owner is not websocket
     await websocket.send_json({"type":"ready","readonly":readonly})
+    progress = {'sent':0, 'ack':0}; sent_times = {}
 
     async def output():
         decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         offset = max(0, path.stat().st_size-2_000_000) if path.exists() else 0
         restore = True; previous = None
+        progress['sent'] = progress['ack'] = offset
         while True:
-            if path.is_file():
+            if path.is_file() and progress['sent'] - progress['ack'] < 262144:
                 with path.open("rb") as stream:
                     stream.seek(offset); data=stream.read(65536); offset+=len(data)
                 if data:
-                    await websocket.send_json({"type":"output","data":decoder.decode(data),"restore":restore})
+                    progress['sent'] = offset
+                    sent_times[offset] = time.monotonic()
+                    await websocket.send_json({"type":"output","data":decoder.decode(data),"restore":restore,'seq':offset,'sent_at':time.time()*1000})
                     restore=False
             state_file=path.parent/"terminal-state.json"
             if state_file.is_file():
@@ -135,7 +162,16 @@ async def attach_terminal(websocket: WebSocket, project_id: str, run_id: str):
             value=await websocket.receive_json()
             if not isinstance(value,dict): continue
             kind=value.get("type")
-            if kind=="resize" and owner is websocket and row["state"]=="running":
+            if kind == 'ack':
+                sequence = value.get('seq')
+                if isinstance(sequence,int) and progress['ack'] < sequence <= progress['sent']:
+                    progress['ack'] = sequence
+                    if sequence in sent_times:
+                        from cairn.dispatcher.runtime.terminal_metrics import record
+                        record(path.parent,'server_to_paint_ack',(time.monotonic()-sent_times[sequence])*1000)
+                    for key in list(sent_times):
+                        if key <= sequence: sent_times.pop(key)
+            elif kind=="resize" and owner is websocket and row["state"]=="running":
                 try: control={"type":"resize","rows":max(8,min(int(value["rows"]),150)),"cols":max(30,min(int(value["cols"]),400))}
                 except (ValueError,TypeError,KeyError): continue
                 append_control(path.parent,control)

@@ -126,6 +126,12 @@ class DevelopmentDispatcher:
                 value = intent.work
                 if value is None:
                     continue
+                interactive = value.purpose == 'design'
+                category = 'implementers' if value.role == 'implementer' else 'reviewers' if value.role in ('reviewer','architect') else None
+                limit = getattr(self.config.runtime, 'max_' + category, None) if category else None
+                roles = ('development.implementer',) if category == 'implementers' else ('development.reviewer','development.architect')
+                if value.state != 'approved' and limit is not None and sum(t.task_type in roles for t in self.loop.futures.values()) >= limit: continue
+                if interactive and sum(t.task_type == 'development.design' for t in self.loop.futures.values()) >= self.config.runtime.max_running_projects: continue
                 if project.project.development.phase == "design" and not (value.purpose == "design" or
                     value.purpose == "plan" and value.subject and next((i.work.result.get("design_candidate")
                     for i in project.intents if i.id == value.subject and i.work), None)):
@@ -151,7 +157,7 @@ class DevelopmentDispatcher:
                 if any(next((i.work.state for i in project.intents if i.id == dep and i.work), None) != "verified"
                        for dep in value.dependencies):
                     continue
-                workers = sorted([w for w in self.config.workers if value.role in w.roles and counts.get(w.name, 0) < w.max_running
+                workers = sorted([w for w in self.config.workers if value.role in w.roles and (interactive or counts.get(w.name, 0) < w.max_running)
                                   and (value.role != "implementer" or w.tier == value.model_tier)
                                   and (value.purpose != "design" or w.type == "claudecode" and w.tier == "strong")
                                   and (not (value.purpose == "plan" and value.subject and next((i.work.result.get("design_candidate") for i in project.intents if i.id == value.subject and i.work), None)) or w.type == "claudecode")],
@@ -173,8 +179,9 @@ class DevelopmentDispatcher:
                 run = claim.data
                 cancellation = TaskCancellation()
                 self.owned.add(run["id"])
-                future = self.loop.executor.submit(self.execute, project, intent, worker, run, cancellation)
-                self.loop.futures[future] = RunningTask(summary.id, "development." + ("integration" if integration else value.role),
+                executor = self.loop.design_executor if interactive else self.loop.executor
+                future = executor.submit(self.execute, project, intent, worker, run, cancellation)
+                self.loop.futures[future] = RunningTask(summary.id, "development." + ("integration" if integration else 'design' if interactive else value.role),
                                                       name, cancellation, intent_id=intent.id)
                 self.loop.runtime_project_ids.add(summary.id)
                 LOG.info("Development task started project=%s intent=%s role=%s worker=%s run=%s",
@@ -346,6 +353,9 @@ class DevelopmentDispatcher:
                 driver = get_driver(worker.type, "local")
                 session = driver.prepare_session()
                 run_worker = worker.model_copy(deep=True)
+                if intent.work.role == 'implementer':
+                    from cairn.dispatcher.runtime.workspace_guard import prepare
+                    run_worker.env.update(prepare(worktree, directory))
                 if worker.type == "claudecode":
                     # Magpie owns upstream failover; avoid multiplying its retries in this CLI.
                     run_worker.env.setdefault("CLAUDE_CODE_MAX_RETRIES", os.environ.get("CLAUDE_CODE_MAX_RETRIES", "0"))
@@ -371,7 +381,16 @@ class DevelopmentDispatcher:
                     if checks:
                         evidence.extend(Evidence.model_validate(item) for check in checks.results.values() for item in check["evidence"])
                 else:
-                    argv = executable_argv(run_worker, driver.build_execute(run_worker, prompt, session).argv)
+                    from cairn.dispatcher.runtime.session_resume import compatible_session, session_identity
+                    identity = session_identity(worker, intent, worktree)
+                    previous = self.call(project.project.id, f'intents/{intent.id}/runs') if intent.work.role == 'implementer' else []
+                    resumed = compatible_session(directory.parent, previous, run['id'], identity)
+                    if resumed: session = resumed
+                    argv = executable_argv(run_worker, driver.build_conclude(run_worker, prompt, session) if resumed else driver.build_execute(run_worker, prompt, session).argv)
+                    atomic_json(directory/'session-context.json', {**identity, 'session':session})
+                    if intent.work.role in ("implementer", "planner"):
+                        from cairn.dispatcher.collaboration_tools import configure_tools
+                        argv = configure_tools(argv, worker.type, directory)
                     env = {**run_worker.env, "CAIRN_CONTEXT_PATH": str(context_path), "CAIRN_CHECKPOINT_PATH": str(checkpoint),
                            "CAIRN_SERVER": self.config.server, "CAIRN_PROJECT_ID": project.project.id,
                            "CAIRN_RUN_ID": run["id"], "CAIRN_RUN_TOKEN": run["token"]}
@@ -401,6 +420,8 @@ class DevelopmentDispatcher:
                     "worker_type": worker.type, "tier": worker.tier,
                     "cli": {"exit_code": result.returncode, "timed_out": result.timed_out, "cancelled": result.cancelled}}
                 session = driver.extract_session(session, result.stdout, result.stderr)
+                if intent.work.role == 'implementer' and (directory/'session-context.json').exists():
+                    atomic_json(directory/'session-context.json', {**identity,'session':session})
                 if result.cancelled or cancellation.is_cancelled:
                     outcome, detail = "cancelled", cancellation.reason or result.cancel_reason or "cancelled"
                 elif result.timed_out:

@@ -11,17 +11,51 @@ function designFeatures() {
 
     toolHTML(entry) { return agentToolHTML(entry, this.toolOpen[entry.id]); },
 
-    terminalStates: {},
+    terminalStates: {}, designConnecting: false, designConnection: '',
+    async connectDesign() {
+      if (this.designConnecting || this.sideTab !== 'design' || this.project?.project?.development?.phase !== 'design' || this.project.project.status !== 'active' || this.designDraft.candidate?.digest) return;
+      const projectId = this.selectedProjectId;
+      this.designConnecting = true;
+      try {
+        const state = await this.api('POST', `/projects/${projectId}/development/design/connect`, {});
+        if (this.selectedProjectId === projectId) this.designConnection = state.state === 'queued' ? '终端已排队，等待调度器连接' : '正在连接方案设计终端';
+      } catch (e) { if (this.selectedProjectId === projectId) this.designConnection = e.message; }
+      finally { this.designConnecting = false; }
+    },
+    async chooseDesignMode(mode) {
+      const projectId = this.selectedProjectId;
+      try {
+        const draft = await this.api('POST', `/projects/${projectId}/development/design/mode`, {version:this.designDraft.version,mode});
+        if (this.selectedProjectId === projectId) this.designDraft = draft;
+      } catch(e) { if (this.selectedProjectId === projectId) this.designError = e.message; }
+    },
+    designChangesStatus() {
+      if (this.designError) return '比较暂不可用：' + this.designError;
+      if (this.designReadiness.version < 0) return '正在读取比较基准…';
+      if (!this.designReview?.comparison) return '尚无冻结版本可供比较；首次冻结后将展示修订差异。';
+      const c = this.designReview.comparison, changes = this.designReview.changes;
+      return `冻结 v${c.from_version} → 当前草案 v${c.to_version}` + (changes && Object.values(changes).every(v => !v.length) ? '：内容尚无变化。' : '：以下为修订差异。');
+    },
     reconnectDesignTerminal() { cairnTerminal?.dispose(); this.$nextTick(()=>this.syncDesignTerminal()); },
     designTerminalRun() {
       const session = this.selectedAgentSession() || this.projectSessions().find(s => s.main);
       return session?.runs.filter(r => r.streams?.terminal).at(-1) || null;
     },
+    designConnectionStatus() {
+      const run = this.designTerminalRun();
+      if (!run) return this.designConnection || '正在准备终端';
+      if (run.state !== 'running') return '历史会话已结束';
+      return ({idle:'已连接 · 等待输入',working:'已连接 · 正在处理',starting:'终端启动中',connecting:'正在连接',disconnected:'连接已断开',closed:'会话已结束'})[this.terminalStates[run.id]] || '正在连接终端';
+    },
     syncDesignTerminal() {
       const run = this.designTerminalRun();
-      const host = this.selectedAgentSession() ? this.$refs.reviewTerminal : this.$refs.designTerminal;
-      if (run && host && this.sideTab === 'design' && this.view === 'graph') mountDesignTerminal(host,this.selectedProjectId,run,(id,state) => {this.terminalStates[id]=state;});
-      else if (typeof cairnTerminal !== 'undefined') cairnTerminal?.dispose();
+      const review = !!this.selectedAgentSession(), projectId = this.selectedProjectId;
+      if (run && this.sideTab === 'design' && this.view === 'graph') this.$nextTick(() => {
+        if (this.selectedProjectId !== projectId || this.sideTab !== 'design' || this.view !== 'graph' || this.designTerminalRun()?.id !== run.id) return;
+        const host = review ? this.$refs.reviewTerminal : this.$refs.designTerminal;
+        if (host) mountDesignTerminal(host,projectId,run,(id,state) => {this.terminalStates[id]=state;});
+      });
+      else if (typeof cairnTerminal !== 'undefined') cairnTerminal?.detach();
     },
 
     allAgentSessions() { return this.developmentState.sessions || []; },
@@ -32,7 +66,25 @@ function designFeatures() {
       this.agentSessionKey = session?.main ? '' : key;
       this.agentError = '';
       if (session?.main) this.setStage('design');
-      else this.loadAgentConversation();
+      else { this.sideTab = 'design'; this.loadAgentConversation(); }
+    },
+    sessionStatus(session) {
+      const latest = session.runs?.at(-1);
+      if (latest?.state === 'running' && this.terminalStates[latest.id] === 'idle') return 'idle';
+      if (session.state === 'running') return 'running';
+      return session.runs?.length && session.runs.every(r => r.state !== 'running') ? 'ended' : 'idle';
+    },
+    designStages() {
+      const stages = ['brief','requirements','ux','architecture','plan'];
+      const current = stages.indexOf(this.designDraft.stage);
+      return stages.map((id,index) => ({id,label:this.stageLabel(id),current:index === current,
+        passed:(this.designDraft.stage_reviews || []).some(r => r.stage === id && (r.verdict === 'approve' || r.review === 'approve')),
+        position:index + 1}));
+    },
+    designStageStatus() {
+      const current = this.designReview?.current ? this.designReviewStatus() : '设计中';
+      return `当前：${this.stageLabel(this.designDraft.stage)} · v${this.designDraft.version} · ${current}；` +
+        (this.designDraft.stage === 'plan' ? '最终确认后开始开发' : '下一阶段：' + this.stageLabel(this.nextDesignStage()));
     },
     selectRunSession(run) {
       const session = this.allAgentSessions().find(s => s.runs.some(r => r.id === run.id));
@@ -47,6 +99,7 @@ function designFeatures() {
     async loadAgentConversation() {
       const session = this.selectedAgentSession() || this.projectSessions().find(s => s.main), projectId = this.selectedProjectId;
       if (!session || this.agentLoading) return;
+      if (this.designTerminalRun()) return;
       const history = this.$refs?.agentHistory;
       const follow = history && history.scrollHeight - history.scrollTop - history.clientHeight < 100;
       this.agentLoading = true;

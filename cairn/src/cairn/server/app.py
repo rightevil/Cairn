@@ -9,6 +9,7 @@ from fastapi.staticfiles import StaticFiles
 from cairn import __version__
 from cairn.server import db
 from cairn.server.design import router as design_router
+from cairn.server.collaboration import router as collaboration_router
 from cairn.server.terminal import router as terminal_router
 from cairn.server.routers import development, export, hints, intents, projects, settings, workspace
 from cairn.server.access import OPERATOR_COOKIE, browser_session, local_browser, same_origin
@@ -30,6 +31,7 @@ app = FastAPI(
 )
 
 app.include_router(development.router)
+app.include_router(collaboration_router)
 app.include_router(design_router)
 app.include_router(terminal_router)
 app.include_router(settings.router)
@@ -43,7 +45,7 @@ app.include_router(workspace.router)
 @app.get("/", include_in_schema=False)
 def index(request: Request):
     html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
-    for name in ("workspace.css", "agent-output.js", "development.js", "design.js", "workspace.js"):
+    for name in ("workspace.css", "agent-output.js", "development.js", "design-terminal.js", "design.js", "workspace.js"):
         version = sha256((STATIC_DIR / name).read_bytes()).hexdigest()[:16]
         html = html.replace(f'"/static/{name}"', f'"/static/{name}?v={version}"')
     response = HTMLResponse(html, headers={"Cache-Control": "no-store"})

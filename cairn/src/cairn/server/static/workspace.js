@@ -6,7 +6,7 @@ function cairnApp() {
     ...developmentFeatures(), ...designFeatures(),
     view: 'list', sideTab: 'design', projects: [], project: null, selectedProjectId: '',
     loadingProject: false, loadingList: true, connectionError: '', polling: false,
-    projectSearch: '', panelOpen: true, boardTab: 'graph', taskFilter: 'all', graphHistory: false, graphFocus: '', graphRunCursor: -1, selection: null, graphSignature: '',
+    projectSearch: '', panelOpen: false, boardTab: 'graph', taskFilter: 'all', graphHistory: false, graphFocus: '', graphRunCursor: -1, selection: null, graphSignature: '',
     showNewProject: false, creatingProject: false, folderOpen: false, folderLoading: false, controlOpen: false,
     folderState: { directory: null, name: '', parent: null, breadcrumbs: [], entries: [] },
     folderError: '', folderSearch: '', folderRequest: 0,
@@ -29,7 +29,7 @@ function cairnApp() {
       });
       await this.loadProjects();
       await this.route();
-      window.addEventListener('pagehide', () => { this.designStream?.abort(); if (typeof cairnTerminal !== 'undefined') cairnTerminal?.dispose(); });
+      window.addEventListener('pagehide', () => { this.designStream?.abort(); if (typeof disposeDesignTerminals === 'function') disposeDesignTerminals(); });
       setInterval(() => { if (this.selectedAgentSession()) this.loadAgentConversation(); }, 1000);
       window.addEventListener('hashchange', () => this.route());
       setInterval(async () => {
@@ -128,10 +128,10 @@ function cairnApp() {
       this.designDraft = designFeatures().designDraft; this.designEntries = []; this.designError = '';
       this.fileSuggestions = [];
       this.agentSessionKey = ''; this.agentRunTexts = {};
-      this.view = 'graph'; this.loadingProject = true; this.panelOpen = !(window.innerWidth < 960);
+      this.view = 'graph'; this.loadingProject = true; this.panelOpen = false;
       this.sideTab = stage === 'development' ? 'development' : stage === 'design' ? 'design'
         : this.projects.find(p => p.id === id)?.development?.phase === 'design' ? 'design' : 'development';
-      try { await this.loadProject(id); }
+      try { await this.loadProject(id); if (this.selectedProjectId === id) await this.connectDesign(); }
       catch (e) { if (this.selectedProjectId === id) this.showToast(e.message, 'error'); }
       finally { if (this.selectedProjectId === id) this.loadingProject = false; }
     },
@@ -155,6 +155,8 @@ function cairnApp() {
       this.fileSuggestions = [];
       if (navigate) location.hash = new URLSearchParams({ project: this.selectedProjectId, stage: this.sideTab }).toString();
       this.updateGraph();
+      if (this.sideTab === 'development' && this.project?.project?.development) this.loadCollaboration(this.selectedProjectId);
+      if (this.sideTab === 'design') this.connectDesign();
     },
 
     phaseLabel(project) {
@@ -283,6 +285,7 @@ function cairnApp() {
 
     selectItem(kind, id) {
       this.selection = { kind, id }; this.panelOpen = true;
+      this.taskDetailTab = 'activity'; this.activeTaskRun = ''; this.taskRunText = ''; this.taskRunError = '';
       this.taskActivity = {intent:id, runs:[], next:null};
       if (kind === 'intent' && this.project?.project?.development) this.loadTaskActivity(id);
     },
@@ -314,7 +317,7 @@ function cairnApp() {
 
     graphElements() {
       const facts = (this.project?.facts || []).filter(f => this.graphHistory || f.id === 'origin').map(f => ({ data: { id: 'f:' + f.id, ref: f.id, kind: 'fact', label: f.id === 'origin' ? '代码基线' : f.id === 'goal' ? '项目目标' : f.description.slice(0, 30) } }));
-      let intents = [...this.visibleWork().filter(i => this.graphHistory || i.work?.role === 'implementer' || i.work?.state !== 'verified'), ...(this.taskFilter === 'all' ? (this.project?.intents || []).filter(i => !i.work) : [])];
+      let intents = [...this.visibleWork(), ...(this.taskFilter === 'all' ? (this.project?.intents || []).filter(i => !i.work) : [])];
       if (this.graphFocus) {
         const focus = intents.find(i => i.id === this.graphFocus);
         const refs = new Set([this.graphFocus, ...(focus?.work?.dependencies || []), ...intents.filter(i => i.work?.dependencies?.includes(this.graphFocus)).map(i => i.id)]);
@@ -357,7 +360,7 @@ function cairnApp() {
         workspaceGraph = cytoscape({ container, elements, minZoom: 0.1, maxZoom: 2.5,
           layout: { name: 'dagre', rankDir: 'LR', fit: false, padding: 40, nodeSep: 42, rankSep: 80 },
           style: [
-            { selector:'node', style:{label:'data(label)','font-family':getComputedStyle(document.documentElement).getPropertyValue('--font-body').trim(),'font-size':13,color:token('ink'),'text-wrap':'wrap','text-max-width':172,'text-valign':'center','background-color':token('paper'),shape:'roundrectangle',width:200,height:96,'border-width':2,'border-color':token('muted')} },
+            { selector:'node', style:{label:'data(label)','font-family':getComputedStyle(document.documentElement).getPropertyValue('--font-body').trim(),'font-size':13,'line-height':1.4,color:token('ink'),'text-wrap':'wrap','text-max-width':172,'text-valign':'center','background-color':token('paper'),shape:'roundrectangle',width:200,height:96,'border-width':2,'border-color':token('muted')} },
             { selector:'node[kind="fact"]',style:{shape:'hexagon','background-color':token('paper'),'border-color':token('cool'),color:token('cool'),'border-style':'dashed'} },
             { selector:'node[state="running"]',style:{'border-color':token('accent'),'border-width':4,color:token('accent')} },
             { selector:'node[state="running"][role="reviewer"], node[state="running"][role="architect"]',style:{'border-color':token('cool'),color:token('cool'),shape:'cutrectangle'} },

@@ -18,6 +18,57 @@ from test_development_runtime import repository
 pytestmark = pytest.mark.skipif(os.environ.get('CAIRN_NATIVE_CLAUDE_TEST') != '1', reason='Opt-in native Claude integration')
 
 
+def test_actual_implementation_guards_external_write_and_shell_paths(repository, tmp_path):
+    import subprocess
+    from cairn.dispatcher.development import executable_argv
+    from cairn.dispatcher.runtime.workspace_guard import prepare
+    from cairn.dispatcher.workers.adapters.claudecode import ClaudeCodeDriver
+    directory = tmp_path/'implementation'; directory.mkdir()
+    outside, inside = tmp_path/'outside.js', repository/'owned.js'
+    calls, collaboration = [], []
+    class Model(BaseHTTPRequestHandler):
+        def log_message(self, *args): pass
+        def do_POST(self):
+            body=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+            if self.path.endswith('/collaboration/context'):
+                collaboration.append(body)
+                data=b'{"task_id":"task","tasks":[],"inbox":[]}'
+                self.send_response(200);self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data);return
+            if 'count_tokens' in self.path:
+                data=b'{"input_tokens":100}'; self.send_response(200); self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data);return
+            index=len(calls);calls.append(body)
+            tasks=[('mcp__cairn_collaboration__get_latest_context',{}),('Write',{'file_path':str(outside),'content':'must be denied'}),
+                ('Bash',{'command':'python -c "from pathlib import Path; Path('+repr(str(outside))+').write_text(\'must be denied\')"'}),
+                ('Write',{'file_path':str(inside),'content':'owned source'})]
+            chosen=tasks[index] if index<len(tasks) else None
+            content={'type':'tool_use','id':'guard_'+str(index),'name':chosen[0],'input':{}} if chosen else {'type':'text','text':''}
+            frames=[('message_start',{'type':'message_start','message':{'id':'msg'+str(index),'type':'message','role':'assistant','model':body['model'],'content':[],'stop_reason':None,'usage':{'input_tokens':100,'output_tokens':0}}}),
+                ('content_block_start',{'type':'content_block_start','index':0,'content_block':content}),
+                ('content_block_delta',{'type':'content_block_delta','index':0,'delta':{'type':'input_json_delta','partial_json':json.dumps(chosen[1])} if chosen else {'type':'text_delta','text':'{"kind":"implemented","summary":"Guard check completed"}'}}),
+                ('content_block_stop',{'type':'content_block_stop','index':0}),
+                ('message_delta',{'type':'message_delta','delta':{'stop_reason':'tool_use' if chosen else 'end_turn','stop_sequence':None},'usage':{'output_tokens':20}}),('message_stop',{'type':'message_stop'})]
+            data=''.join('event: '+name+'\ndata: '+json.dumps(value)+'\n\n' for name,value in frames).encode()
+            self.send_response(200);self.send_header('Content-Type','text/event-stream');self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data)
+    server=ThreadingHTTPServer(('127.0.0.1',0),Model);threading.Thread(target=server.serve_forever,daemon=True).start()
+    worker=WorkerConfig(name='guard',type='claudecode',roles=['implementer'],max_running=1,priority=0,
+        env={**prepare(repository,directory),'ANTHROPIC_BASE_URL':f'http://127.0.0.1:{server.server_port}',
+             'ANTHROPIC_AUTH_TOKEN':'local-test-only','ANTHROPIC_API_KEY':'','ANTHROPIC_MODEL':'claude-sonnet-4-6',
+             'CLAUDE_CODE_MAX_RETRIES':'0','CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC':'1','HTTP_PROXY':'','HTTPS_PROXY':'','ALL_PROXY':'','NO_PROXY':'127.0.0.1,localhost'})
+    driver=ClaudeCodeDriver()
+    try:
+        argv=executable_argv(worker,driver.build_execute(worker,'Exercise workspace controls.',driver.prepare_session()).argv)
+        from cairn.dispatcher.collaboration_tools import configure_tools
+        argv=configure_tools(argv,'claudecode',directory)
+        runtime_env={**os.environ,**worker.env,'CAIRN_SERVER':f'http://127.0.0.1:{server.server_port}',
+                     'CAIRN_PROJECT_ID':'project','CAIRN_RUN_ID':'run','CAIRN_RUN_TOKEN':'local-capability'}
+        process=subprocess.run(argv,cwd=repository,env=runtime_env,capture_output=True,text=True,encoding='utf-8',errors='replace',timeout=35)
+    finally: server.shutdown();server.server_close()
+    assert process.returncode == 0, process.stderr[-1000:]
+    assert not outside.exists(), 'Both external Write and explicit external Shell write must be refused'
+    assert inside.read_text() == 'owned source'
+    assert len(calls) >= 5 and collaboration == [{'token':'local-capability'}]
+
+
 def test_actual_claude_does_not_multiply_gateway_retries(repository):
     import subprocess
     from cairn.dispatcher.development import executable_argv, classify_failure
@@ -78,8 +129,10 @@ def test_actual_review_cli_denies_source_edits_but_can_write_own_report(reposito
                    ('Write',{'file_path':str(report),'content':'# Independent findings'})]
             if bounded:
                 tools += [('mcp__cairn_review__run_check', {'index':0}), ('mcp__cairn_review__run_check', {'index':0})]
+            else:
+                tools += [('mcp__cairn__submit_review', {'verdict':'request_changes','summary':'独立评审意见已记录'})]
             chosen=tools[index] if index<len(tools) else None
-            result=json.dumps({'kind':'review','verdict':'request_changes','summary':'Independent findings recorded'})
+            result=json.dumps({'kind':'review','verdict':'request_changes','summary':'Independent findings recorded'}) if bounded else '评审需要修订；发现和依据已写入报告。'
             block={'type':'tool_use','id':f'tool_{index}','name':chosen[0],'input':{}} if chosen else {'type':'text','text':''}
             frames=[('message_start',{'type':'message_start','message':{'id':f'msg_{index}','type':'message','role':'assistant','model':body['model'],'content':[],'stop_reason':None,'stop_sequence':None,'usage':{'input_tokens':100,'output_tokens':0}}}),
                 ('content_block_start',{'type':'content_block_start','index':0,'content_block':block}),
@@ -113,7 +166,8 @@ def test_actual_review_cli_denies_source_edits_but_can_write_own_report(reposito
         assert any('"reused": true' in json.dumps(body) .replace('\\"','"') for body in requests)
 
 
-def test_native_design_mcp_and_keyboard_guidance_resume(repository,tmp_path):
+@pytest.mark.parametrize('empty_start', [False, True])
+def test_native_design_mcp_and_keyboard_guidance_resume(repository,tmp_path,empty_start):
     from cairn.dispatcher.design_terminal import run_console
     from cairn.dispatcher.development import atomic_json
     from cairn.dispatcher.runtime.git_workspace import git
@@ -162,9 +216,10 @@ def test_native_design_mcp_and_keyboard_guidance_resume(repository,tmp_path):
             state=json.loads(state_file.read_text())
             if state['state']!='idle': continue
             if not sent:
+                if empty_start: assert calls == [], 'Opening an idle terminal must not trigger model generation'
                 seen=state['time']; sent=True
                 atomic_json(run_dir/'operator-input.json',{'nonce':'local-input','time':time.time()})
-                (run_dir/'terminal-input.jsonl').write_text(json.dumps({'type':'input','data':'LOCAL_GUIDANCE'})+'\n'+json.dumps({'type':'input','data':'\r'})+'\n')
+                (run_dir/'terminal-input.jsonl').write_text(json.dumps({'type':'resize','rows':32,'cols':110,'created_at':time.time()})+'\n'+json.dumps({'type':'input','data':'LOCAL_GUIDANCE','created_at':time.time()})+'\n'+json.dumps({'type':'input','data':'\r','created_at':time.time()})+'\n')
             elif state['time']!=seen:
                 with (run_dir/'terminal-input.jsonl').open('a') as f:f.write(json.dumps({'type':'close'})+'\n')
                 return
@@ -173,7 +228,7 @@ def test_native_design_mcp_and_keyboard_guidance_resume(repository,tmp_path):
         task=asyncio.create_task(operate())
         try:
             return await asyncio.wait_for(run_console(dispatcher,project,worker,{'id':'run','token':'local'},run_dir,repository,
-                TaskCancellation(),workspace=workspace,prompt='Design the feature.',session=str(uuid.uuid4()),message_id=1),35)
+                TaskCancellation(),workspace=workspace,prompt=None if empty_start else 'Design the feature.',session=str(uuid.uuid4()),message_id=None if empty_start else 1),35)
         finally:
             task.cancel();await asyncio.gather(task,return_exceptions=True)
     try: result,session=asyncio.run(scenario())

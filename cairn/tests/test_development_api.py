@@ -38,6 +38,119 @@ def claim(http, project, intent, worker="writer", role="planner", revision=1):
                      json={"worker": worker, "role": role, "revision": revision, "host": "local-test"})
 
 
+def test_collaboration_delivery_receipts_and_candidate_authority(http, tmp_path):
+    project, source = create(http, tmp_path)
+    with db.get_conn() as conn:
+        target = store.add_intent(conn, project, "Consume interface", WorkPackage(role="implementer", revision=1))
+    sender = claim(http, project, source).json()
+    receiver = claim(http, project, target, role="implementer").json()
+    url = f"/projects/{project}/development/runs/{sender['id']}/collaboration"
+    payload = {"token": sender["token"], "client_id": "interface-1", "kind": "handoff",
+               "recipient": target, "content": "Candidate API contract", "reference": "api.json", "version": "v1"}
+    assert http.post(url, json={**payload, "token": "wrong"}).status_code == 403
+    assert http.post(url, json={**payload, "reference": ""}).status_code == 422
+    first = http.post(url, json=payload)
+    assert first.status_code == 200, first.text
+    assert http.post(url, json=payload).json()["id"] == first.json()["id"]
+    assert http.post(url, json={**payload, "content": "Different API"}).status_code == 409
+    assert http.get(f"/projects/{project}/development/collaboration").status_code == 401
+    inbox_url = f"/projects/{project}/development/runs/{receiver['id']}/collaboration"
+    context = http.post(inbox_url + "/context", json={"token": receiver["token"]}).json()
+    assert [m["id"] for m in context["inbox"]] == [first.json()["id"]]
+    assert http.post(url + "/acknowledge", json={"token": sender["token"], "ids": [first.json()["id"]]}).status_code == 409
+    # A project with many recent messages must not lose its oldest unread handoff.
+    for index in range(101):
+        assert http.post(url, json={**payload, "client_id": f"noise-{index}", "recipient": source}).status_code == 200
+    assert http.post(inbox_url + "/context", json={"token": receiver["token"]}).json()["inbox"][0]["id"] == first.json()["id"]
+    assert http.post(inbox_url + "/acknowledge", json={"token": receiver["token"], "ids": [first.json()["id"]]}).status_code == 200
+    assert http.post(inbox_url + "/context", json={"token": receiver["token"]}).json()["inbox"] == []
+    with db.get_conn() as conn:
+        assert store.work(conn, project, target).state == "running"
+        assert store.project(conn, project).design_revision == 1
+    history = http.get(f"/projects/{project}/development/collaboration", headers=OPERATOR).json()["items"]
+    history = http.get(f"/projects/{project}/development/collaboration?limit=200", headers=OPERATOR).json()["items"]
+    assert next(m for m in history if m['id'] == first.json()['id'])["receipts"][0]["task_id"] == target
+    assert sender["token"] not in str(history)
+
+
+def test_collaboration_rejects_other_projects_cancelled_and_stale_runs(http, tmp_path):
+    project, source = create(http, tmp_path)
+    other, _ = create(http, tmp_path)
+    run = claim(http, project, source).json()
+    tail = f"/development/runs/{run['id']}/collaboration"
+    assert http.post(f"/projects/{other}" + tail + "/context", json={"token": run["token"]}).status_code == 404
+    payload = {"token": run["token"], "client_id": "one", "kind": "message", "content": "Hello", "recipient": "missing"}
+    assert http.post(f"/projects/{project}" + tail, json=payload).status_code == 404
+    with db.get_conn() as conn:
+        conn.execute("UPDATE runs SET cancel_requested=1 WHERE id=?", (run["id"],))
+    assert http.post(f"/projects/{project}" + tail + "/context", json={"token": run["token"]}).status_code == 409
+    with db.get_conn() as conn:
+        conn.execute("UPDATE runs SET cancel_requested=0,heartbeat_at='2000-01-01T00:00:00Z' WHERE id=?", (run["id"],))
+    assert http.post(f"/projects/{project}" + tail + "/context", json={"token": run["token"]}).status_code == 409
+    from cairn.server.services import utcnow
+    with db.get_conn() as conn:
+        conn.execute("UPDATE runs SET heartbeat_at=? WHERE id=?", (utcnow(), run["id"]))
+        work = store.work(conn, project, source); work.role = 'reviewer'; store.save_work(conn, project, source, work)
+    assert http.post(f"/projects/{project}" + tail, json={**payload, 'recipient': None}).status_code == 403
+    with db.get_conn() as conn:
+        config = store.project(conn, project); config.design_revision += 1; store.save_project(conn, project, config)
+    assert http.post(f"/projects/{project}" + tail + "/context", json={"token": run["token"]}).status_code == 409
+
+
+def test_collaboration_cli_configs_are_local_and_credential_free(tmp_path):
+    import json
+    from cairn.dispatcher.collaboration_tools import configure_tools
+    claude = configure_tools(["claude", "-p", "--", "task"], "claudecode", tmp_path)
+    assert claude[-2:] == ["--", "task"]
+    config = json.loads((tmp_path / "collaboration-mcp.json").read_text())
+    assert config["mcpServers"]["cairn_collaboration"]["args"] == ["-m", "cairn.dispatcher.collaboration_tools"]
+    assert "env" not in config["mcpServers"]["cairn_collaboration"]
+    codex = configure_tools(["codex", "exec", "--json", "task"], "codex", tmp_path)
+    assert codex[:2] == ["codex", "exec"] and codex[-2:] == ["--json", "task"]
+
+
+def test_collaboration_mcp_stdio_uses_run_capability():
+    import asyncio
+    import json
+    import os
+    import sys
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+
+    calls = []
+    class Gateway(BaseHTTPRequestHandler):
+        def log_message(self, *args): pass
+        def do_POST(self):
+            calls.append((self.path, json.loads(self.rfile.read(int(self.headers['Content-Length'])))))
+            body = b'{"ok":true}'
+            self.send_response(200); self.send_header('Content-Length', str(len(body)))
+            self.end_headers(); self.wfile.write(body)
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Gateway)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    async def scenario():
+        env = {**os.environ, 'CAIRN_SERVER': f'http://127.0.0.1:{server.server_port}',
+               'CAIRN_PROJECT_ID': 'project', 'CAIRN_RUN_ID': 'run', 'CAIRN_RUN_TOKEN': 'run-capability',
+               'HTTP_PROXY': '', 'HTTPS_PROXY': '', 'ALL_PROXY': '', 'NO_PROXY': '127.0.0.1,localhost'}
+        params = StdioServerParameters(command=sys.executable, args=['-m', 'cairn.dispatcher.collaboration_tools'], env=env)
+        async with stdio_client(params) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                assert {t.name for t in (await session.list_tools()).tools} == {
+                    'get_latest_context', 'publish_contribution', 'acknowledge_contributions'}
+                assert not (await session.call_tool('get_latest_context', {})).is_error
+                assert not (await session.call_tool('publish_contribution', {
+                    'kind': 'handoff', 'content': 'Candidate interface', 'reference': 'api.json', 'version': 'v1', 'client_id': 'one'})).is_error
+                assert not (await session.call_tool('acknowledge_contributions', {'ids': [1]})).is_error
+    try:
+        asyncio.run(asyncio.wait_for(scenario(), 20))
+    finally:
+        server.shutdown(); server.server_close()
+    assert [path.rsplit('/', 1)[-1] for path, _ in calls] == ['context', 'collaboration', 'acknowledge']
+    assert all(body['token'] == 'run-capability' for _, body in calls)
+
+
 def test_delete_project_requires_operator_and_stopped_agents_and_preserves_files(http, tmp_path):
     project, intent = create(http, tmp_path)
     marker = tmp_path / "keep.txt"
