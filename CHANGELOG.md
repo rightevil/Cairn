@@ -1,3 +1,9 @@
+## v0.3.1 (2026-10-30)
+
+### Fix
+
+- **packaging**: write portable checksums with LF line endings
+
 ## v0.3.0 (2026-10-30)
 
 ### Feat
