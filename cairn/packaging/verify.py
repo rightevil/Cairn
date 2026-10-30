@@ -33,7 +33,7 @@ def main():
     package = root / 'dist' / f'Cairn-{version}-windows-x64.zip'
     with package.open('rb') as source:
         digest = hashlib.file_digest(source, 'sha256').hexdigest()
-    assert package.with_suffix('.zip.sha256').read_text(encoding='utf-8') == f'{digest}  {package.name}\n'
+    assert package.with_suffix('.zip.sha256').read_bytes() == f'{digest}  {package.name}\n'.encode('utf-8')
     with tempfile.TemporaryDirectory(prefix='cairn-release-') as temporary:
         directory = Path(temporary)
         with zipfile.ZipFile(package) as archive:

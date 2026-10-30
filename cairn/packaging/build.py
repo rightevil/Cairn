@@ -40,7 +40,7 @@ def main():
                     archive.write(item, Path('Cairn') / item.relative_to(output))
     with package.open('rb') as source:
         digest = hashlib.file_digest(source, 'sha256').hexdigest()
-    package.with_suffix('.zip.sha256').write_text(f'{digest}  {package.name}\n', encoding='utf-8')
+    package.with_suffix('.zip.sha256').write_text(f'{digest}  {package.name}\n', encoding='utf-8', newline='\n')
     shutil.copytree(output, root / 'dist/Cairn', dirs_exist_ok=True)
 
 
