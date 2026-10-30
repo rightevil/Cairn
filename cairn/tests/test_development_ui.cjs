@@ -21,7 +21,7 @@ app.designDraft.stage_reviews=[{stage:'brief',review:'approve'}];
 assert.equal(app.designStages()[0].passed,true);
 assert.equal(app.designStages()[1].passed,false);
 app.collaboration=[{task_id:'source',recipient:'target'},{task_id:'other',recipient:null},{task_id:'other',recipient:'unrelated'}];
-const originalSelected=app.selectedIntent; app.selectedIntent=()=>({id:'target',work:{state:'reviewing'}});
+const originalSelected=app.selectedIntent; app.selectedIntent=()=>({id:'target',work:{role:'implementer',state:'reviewing',head_commit:'candidate'}});
 assert.equal(app.taskContributions().length,2);
 assert.equal(app.taskPipeline()[1].active,true);
 assert.equal(app.taskPipeline()[0].done,true);
@@ -273,7 +273,7 @@ board.taskFilter='all';board.graphHistory=true;
 assert(board.graphElements().some(e=>e.data.id==='f:old-fact'));
 let layouts=0,zoom=.65,pan={x:120,y:45};
 graphElements=board.graphElements();
-context.testGraph={resize(){},json(value){if(value){graphElements=value.elements;return;}return {elements:{nodes:graphElements.filter(e=>!e.data.source),edges:graphElements.filter(e=>e.data.source)}};},
+context.testGraph={resize(){},nodes(){return graphElements.filter(e=>!e.data.source).map(e=>({id:()=>e.data.id,data:()=>e.data,position:axis=>axis ? 10 : {x:10,y:10}}));},elements(){return {removeClass(){}};},json(value){if(value){graphElements=value.elements;return;}return {elements:{nodes:graphElements.filter(e=>!e.data.source),edges:graphElements.filter(e=>e.data.source)}};},
   layout(){return {run(){layouts++;}};},zoom(value){if(value!==undefined)zoom=value;return zoom;},pan(value){if(value!==undefined)pan=value;return pan;}};
 vm.runInContext('workspaceGraph=testGraph',context);
 board.view='graph';board.sideTab='development';board.$refs={blackboard:{clientWidth:800}};board.$nextTick=fn=>fn();

@@ -7,6 +7,7 @@ function cairnApp() {
     view: 'list', sideTab: 'design', projects: [], project: null, selectedProjectId: '',
     loadingProject: false, loadingList: true, connectionError: '', polling: false,
     projectSearch: '', panelOpen: false, boardTab: 'graph', taskFilter: 'all', graphHistory: false, graphFocus: '', graphRunCursor: -1, selection: null, graphSignature: '',
+    graphCards: [], graphTransform: '', graphZoom: 100,
     showNewProject: false, creatingProject: false, folderOpen: false, folderLoading: false, controlOpen: false,
     folderState: { directory: null, name: '', parent: null, breadcrumbs: [], entries: [] },
     folderError: '', folderSearch: '', folderRequest: 0,
@@ -123,6 +124,7 @@ function cairnApp() {
       this.controlOpen = false;
       this.designStream?.abort(); this.destroyGraph();
       this.selectedProjectId = id; this.project = null; this.selection = null;
+      this.graphFocus = ''; this.taskFilter = 'all'; this.graphHistory = false; this.graphRunCursor = -1;
       this.designProject = ''; this.designCursor = 0;
       this.developmentControl = { kind: 'suggestion', content: '', scope: '', replaces: '' };
       this.designDraft = designFeatures().designDraft; this.designEntries = []; this.designError = '';
@@ -285,6 +287,7 @@ function cairnApp() {
 
     selectItem(kind, id) {
       this.selection = { kind, id }; this.panelOpen = true;
+      this.syncGraphSelection();
       this.taskDetailTab = 'activity'; this.activeTaskRun = ''; this.taskRunText = ''; this.taskRunError = '';
       this.taskActivity = {intent:id, runs:[], next:null};
       if (kind === 'intent' && this.project?.project?.development) this.loadTaskActivity(id);
@@ -316,27 +319,70 @@ function cairnApp() {
     },
 
     graphElements() {
-      const facts = (this.project?.facts || []).filter(f => this.graphHistory || f.id === 'origin').map(f => ({ data: { id: 'f:' + f.id, ref: f.id, kind: 'fact', label: f.id === 'origin' ? '代码基线' : f.id === 'goal' ? '项目目标' : f.description.slice(0, 30) } }));
+      const facts = (this.project?.facts || []).filter(f => this.graphHistory || f.id === 'origin').map(f => ({ data: { id: 'f:' + f.id, ref: f.id, kind: 'fact', key: f.id, title: f.id === 'origin' ? '代码基线' : f.id === 'goal' ? '项目目标' : f.description,
+        stateLabel: '⬡ 事实', tone: 'fact', roleLabel: '事实来源', activity: f.description, steps: [] } }));
       let intents = [...this.visibleWork(), ...(this.taskFilter === 'all' ? (this.project?.intents || []).filter(i => !i.work) : [])];
       if (this.graphFocus) {
         const focus = intents.find(i => i.id === this.graphFocus);
         const refs = new Set([this.graphFocus, ...(focus?.work?.dependencies || []), ...intents.filter(i => i.work?.dependencies?.includes(this.graphFocus)).map(i => i.id)]);
         intents = intents.filter(i => refs.has(i.id));
       }
-      const nodes = [...facts, ...intents.map(i => ({ data: { id: 'i:' + i.id, ref: i.id, kind: 'intent', role:i.work?.role,
-        label: this.graphStateLabel(i) + '\n' + (i.work?.key || i.id) + '\n' + this.developmentText(i.description).slice(0, 34), state: i.work?.state || (i.to ? 'verified' : i.worker ? 'running' : 'ready') } }))];
+      const nodes = [...facts, ...intents.map(i => {
+        const state = i.work?.state || (i.to ? 'verified' : i.worker ? 'running' : 'ready');
+        const runs = this.runningDevelopmentRuns().filter(r => r.intent_id === i.id || this.runTask(r)?.id === i.id);
+        const waiting = this.taskIsWaiting(i);
+        const needsChanges = ['request_changes','needs_design','reject','defer'].includes(i.work?.result?.output?.verdict);
+        const tone = needsChanges ? 'waiting' : state === 'verified' ? 'verified' : waiting ? 'waiting'
+          : ['implemented','reviewing','approved','merged'].includes(state) || state === 'running' && ['reviewer','architect'].includes(i.work?.role) ? 'review' : state === 'running' ? 'running' : 'ready';
+        return { data: { id: 'i:' + i.id, ref: i.id, kind: 'intent', role: i.work?.role, state,
+          key: i.work?.key || i.id, title: this.developmentText(i.description), stateLabel: this.graphStateLabel(i), tone,
+          roleLabel: i.work ? this.developmentRole(i.work.role) : '探索任务', live: runs.length > 0,
+          activity: runs.length ? runs.map(r => r.worker + ' · ' + this.developmentRunStatus(r) + (r.checkpoint ? ' · ' + r.checkpoint : '')).join('；')
+            : this.taskWait(i) || (waiting ? i.work?.checkpoint || '等待条件满足，点击查看详情' : i.work ? this.developmentPhase(i) : '等待执行'),
+          steps: this.taskPipeline(i) } };
+      })];
       const known = new Set(nodes.map(n => n.data.id)), edges = [];
       const add = (source, target, type) => { if (known.has(source) && known.has(target)) edges.push({ data: { id: `${type}:${source}:${target}`, source, target, type } }); };
       for (const i of intents) {
         for (const from of i.from || []) add('f:' + from, 'i:' + i.id, 'fact');
         if (i.to) add('i:' + i.id, 'f:' + i.to, 'fact');
         for (const dependency of i.work?.dependencies || []) add('i:' + dependency, 'i:' + i.id, 'dependency');
+        if (i.work?.subject) add('i:' + i.work.subject, 'i:' + i.id, 'review');
       }
       return [...nodes, ...edges];
     },
     destroyGraph() {
       workspaceGraphObserver?.disconnect(); workspaceGraphObserver = null;
       workspaceGraph?.destroy(); workspaceGraph = null; this.graphSignature = '';
+      this.graphCards = []; this.graphTransform = ''; this.graphZoom = 100;
+    },
+    syncGraphViewport() {
+      if (!workspaceGraph) return;
+      const pan = workspaceGraph.pan(), zoom = workspaceGraph.zoom();
+      this.graphTransform = `translate(${pan.x}px,${pan.y}px) scale(${zoom})`;
+      this.graphZoom = Math.round(zoom * 100);
+    },
+    syncGraphCards() {
+      if (!workspaceGraph) return;
+      this.graphCards = workspaceGraph.nodes().map(node => ({ ...node.data(), x: node.position('x'), y: node.position('y') }));
+      this.syncGraphViewport(); this.syncGraphSelection();
+    },
+    syncGraphSelection() {
+      if (!workspaceGraph) return;
+      const id = this.selection ? (this.selection.kind === 'fact' ? 'f:' : 'i:') + this.selection.id : '';
+      workspaceGraph.elements().removeClass('related');
+      if (this.panelOpen && id) workspaceGraph.getElementById(id).closedNeighborhood().addClass('related');
+    },
+    zoomGraph(factor, event = null) {
+      if (!workspaceGraph) return;
+      const box = this.$refs.blackboard.getBoundingClientRect();
+      workspaceGraph.zoom({ level: Math.min(2.5, Math.max(.1, workspaceGraph.zoom() * factor)),
+        renderedPosition: event ? { x: event.clientX - box.left, y: event.clientY - box.top } : { x: box.width / 2, y: box.height / 2 } });
+    },
+    revealGraphCard(card) {
+      if (!workspaceGraph) return;
+      const node = workspaceGraph.getElementById(card.id), p = node.renderedPosition(), zoom = workspaceGraph.zoom();
+      if (p.x < 132 * zoom || p.x > workspaceGraph.width() - 132 * zoom || p.y < 78 * zoom || p.y > workspaceGraph.height() - 78 * zoom) workspaceGraph.center(node);
     },
     updateGraph() {
       if (this.view !== 'graph' || this.sideTab !== 'development' || this.boardTab !== 'graph') return;
@@ -344,33 +390,33 @@ function cairnApp() {
         const container = this.$refs.blackboard;
         if (!container || !container.clientWidth || !this.project) return;
         const elements = this.graphElements(), signature = JSON.stringify(elements);
-        if (workspaceGraph && signature === this.graphSignature) { workspaceGraph.resize(); return; }
+        if (workspaceGraph && signature === this.graphSignature) { workspaceGraph.resize(); this.syncGraphSelection(); return; }
         this.graphSignature = signature;
         if (workspaceGraph) {
           const zoom = workspaceGraph.zoom(), pan = workspaceGraph.pan();
           const topology = items => items.map(e => e.data.id).sort().join('|');
           const previous = workspaceGraph.json().elements;
           const changed = topology([...(previous.nodes || []), ...(previous.edges || [])]) !== topology(elements);
-          workspaceGraph.json({ elements });
+          // Keep model positions when polling replaces node data; only topology changes need a layout.
+          const positions = new Map(workspaceGraph.nodes().map(n => [n.id(), n.position()]));
+          workspaceGraph.json({ elements: elements.map(e => positions.has(e.data.id) ? { ...e, position: positions.get(e.data.id) } : e) });
           if (changed) workspaceGraph.layout({ name: 'dagre', rankDir: 'LR', fit: false, nodeSep: 42, rankSep: 80 }).run();
           workspaceGraph.zoom(zoom); workspaceGraph.pan(pan);
+          this.syncGraphCards();
           return;
         }
         const token = name => getComputedStyle(document.documentElement).getPropertyValue('--graph-' + name).trim();
-        workspaceGraph = cytoscape({ container, elements, minZoom: 0.1, maxZoom: 2.5,
+        workspaceGraph = cytoscape({ container, elements, minZoom: 0.1, maxZoom: 2.5, autoungrabify: true,
           layout: { name: 'dagre', rankDir: 'LR', fit: false, padding: 40, nodeSep: 42, rankSep: 80 },
           style: [
-            { selector:'node', style:{label:'data(label)','font-family':getComputedStyle(document.documentElement).getPropertyValue('--font-body').trim(),'font-size':13,'line-height':1.4,color:token('ink'),'text-wrap':'wrap','text-max-width':172,'text-valign':'center','background-color':token('paper'),shape:'roundrectangle',width:200,height:96,'border-width':2,'border-color':token('muted')} },
-            { selector:'node[kind="fact"]',style:{shape:'hexagon','background-color':token('paper'),'border-color':token('cool'),color:token('cool'),'border-style':'dashed'} },
-            { selector:'node[state="running"]',style:{'border-color':token('accent'),'border-width':4,color:token('accent')} },
-            { selector:'node[state="running"][role="reviewer"], node[state="running"][role="architect"]',style:{'border-color':token('cool'),color:token('cool'),shape:'cutrectangle'} },
-            { selector:'node[state="verified"]',style:{'border-color':token('ok'),color:token('ok')} },
-            { selector:'node[state="reviewing"], node[state="approved"], node[state="merged"], node[state="implemented"]',style:{'border-color':token('cool'),color:token('cool'),shape:'cutrectangle'} },
-            { selector:'node[state="waiting"], node[state="failed"], node[state="blocked"]',style:{'border-color':token('bad'),color:token('bad'),'border-style':'double'} },
+            { selector:'node', style:{width:264,height:156,shape:'rectangle','background-opacity':0,'border-width':0,label:''} },
             { selector:'edge',style:{width:2,'line-color':token('muted'),'target-arrow-color':token('muted'),'target-arrow-shape':'triangle','curve-style':'bezier'} },
             { selector:'edge[type="fact"]',style:{'line-style':'dashed',opacity:.35} },
-            { selector:':selected',style:{'border-color':token('ink'),'border-width':4} },
+            { selector:'edge[type="review"]',style:{'line-style':'dotted','line-color':token('cool'),'target-arrow-color':token('cool')} },
+            { selector:'edge.related',style:{width:3,'line-color':token('cool'),'target-arrow-color':token('cool'),opacity:1} },
           ] });
+        workspaceGraph.on('pan zoom', () => this.syncGraphViewport());
+        workspaceGraph.on('layoutstop', () => this.syncGraphCards());
         workspaceGraph.on('tap', 'node', event => { this.selectItem(event.target.data('kind'), event.target.data('ref')); });
         workspaceGraph.ready(() => requestAnimationFrame(() => {
           if (!workspaceGraph) return;
@@ -378,22 +424,34 @@ function cairnApp() {
           const running = workspaceGraph.nodes().filter(n => n.data('state')==='running');
           const active = running.length ? running : workspaceGraph.nodes().filter(n => n.data('state')==='reviewing');
           workspaceGraph.center(active.length ? active.first() : workspaceGraph.nodes().first());
+          this.syncGraphCards();
         }));
-        workspaceGraphObserver = new ResizeObserver(() => workspaceGraph?.resize());
+        workspaceGraphObserver = new ResizeObserver(() => {
+          if (!workspaceGraph) return;
+          workspaceGraph.resize();
+          if (this.panelOpen && this.selection) {
+            const id = (this.selection.kind === 'fact' ? 'f:' : 'i:') + this.selection.id;
+            const node = workspaceGraph.getElementById(id);
+            if (node.length) workspaceGraph.center(node);
+          }
+        });
         workspaceGraphObserver.observe(container);
       });
     },
     graphStateLabel(intent) {
       const state = intent.work?.state || (intent.to ? 'verified' : intent.worker ? 'running' : 'ready');
+      if (state === 'verified' && intent.work && intent.work.role !== 'implementer') return '◇ ' + this.developmentPhase(intent);
       if (state === 'ready' && intent.work?.dependencies?.some(id => this.project.intents.find(i => i.id === id)?.work?.state !== 'verified')) return '□ 依赖等待';
-      if (state === 'running' && ['reviewer','architect'].includes(intent.work?.role)) return '◇ 独立审查中';
-      return ({ready:'□ 待执行',running:'▶ 运行中',reviewing:'◇ 审查中',implemented:'◇ 待审查',approved:'◇ 待集成',merged:'◇ 验证中',verified:'✓ 已验证',waiting:'! 等待处理',failed:'! 失败',blocked:'! 阻塞'})[state] || state;
+      if (state === 'ready' && this.taskIsWaiting(intent)) return this.developmentState.scheduling?.[intent.id]?.status === 'retry' ? '! 等待重试' : '! 等待资源';
+      if (state === 'running' && ['reviewer','architect'].includes(intent.work?.role)) return '◇ 审查／决策中';
+      if (state === 'reviewing' && intent.work?.role === 'implementer' && (!intent.work.head_commit || intent.work.result?.pending_design)) return '! 等待设计决策';
+      return ({ready:'□ 待执行',running:'▶ 运行中',reviewing:'◇ 审查中',implemented:'◇ 待审查',approved:'◇ 待集成',merged:'◇ 待验证',verified:'✓ 已验证',waiting:'! 等待处理',failed:'! 失败',blocked:'! 阻塞',rejected:'! 需修订'})[state] || state;
     },
     focusRunning() {
       this.graphFocus = ''; this.taskFilter = 'all'; this.updateGraph();
       this.$nextTick(() => {
         if (!workspaceGraph) return;
-        let nodes = workspaceGraph.nodes().filter(n => n.data('state') === 'running');
+        let nodes = workspaceGraph.nodes().filter(n => n.data('state') === 'running' || n.data('live'));
         if (!nodes.length) nodes = workspaceGraph.nodes().filter(n => ['reviewing','implemented','approved','merged'].includes(n.data('state')));
         if (!nodes.length) { this.showToast('当前没有执行或审查中的任务'); return; }
         this.graphRunCursor = (this.graphRunCursor + 1) % nodes.length;
@@ -404,6 +462,11 @@ function cairnApp() {
         if (nodes.length > 1) this.showToast(`已定位 ${target[0].data('ref')}（${this.graphRunCursor + 1}/${nodes.length}），再次点击查看下一项`);
       });
     },
-    fitGraph() { this.graphFocus = ''; this.updateGraph(); this.$nextTick(() => workspaceGraph?.fit(undefined,40)); },
+    focusRelated() {
+      if (this.selection?.kind !== 'intent') return;
+      this.taskFilter = 'all'; this.graphFocus = this.selection.id; this.fitVisibleGraph();
+    },
+    fitVisibleGraph() { this.updateGraph(); this.$nextTick(() => { if (this.boardTab === 'graph') workspaceGraph?.fit(undefined,60); }); },
+    fitGraph() { this.graphFocus = ''; this.taskFilter = 'all'; this.fitVisibleGraph(); },
   };
 }

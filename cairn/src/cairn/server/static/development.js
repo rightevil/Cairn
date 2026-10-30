@@ -47,13 +47,13 @@ function developmentFeatures() {
         if (this.selectedProjectId === projectId && this.activeTaskRun === run.id) this.taskRunError = e.message;
       } finally { this.taskRunLoading = false; }
     },
-    taskPipeline() {
-      const work = this.selectedIntent()?.work;
-      if (!work) return [];
+    taskPipeline(intent = this.selectedIntent()) {
+      const work = intent?.work;
+      if (!work || work.role !== 'implementer') return [];
       const states = ['ready','running','implemented','reviewing','approved','merged','verified'];
-      const position = states.indexOf(work.state);
+      const position = work.state === 'reviewing' && (!work.head_commit || work.result?.pending_design) ? -1 : states.indexOf(work.state);
       return [{label:'实施',done:position >= 2,active:work.state === 'running'},
-        {label:'独立审核',done:position >= 4,active:work.state === 'reviewing'},
+        {label:'独立审核',done:position >= 4,active:position >= 2 && work.state === 'reviewing'},
         {label:'集成',done:position >= 5,active:work.state === 'approved'},
         {label:'验证',done:work.state === 'verified',active:work.state === 'merged'}];
     },
@@ -94,7 +94,7 @@ function developmentFeatures() {
 
     visibleWork() {
       return this.developmentWork().filter(i => this.graphHistory || ['implementer','planner'].includes(i.work.role)).filter(i => this.taskFilter === 'active' ? ['running','implemented','reviewing','approved','merged'].includes(i.work.state)
-        : this.taskFilter === 'waiting' ? i.work.state === 'waiting' || i.work.state === 'ready' && (i.work.dependencies || []).some(id => this.project.intents.find(d => d.id === id)?.work?.state !== 'verified')
+        : this.taskFilter === 'waiting' ? this.taskIsWaiting(i)
         : this.taskFilter === 'verified' ? i.work.state === 'verified' : true);
     },
 
@@ -221,6 +221,13 @@ function developmentFeatures() {
 
     taskWait(intent) {
       return this.developmentState.scheduling?.[intent.id]?.detail || '';
+    },
+    taskIsWaiting(intent) {
+      const work = intent.work;
+      return !!work && (['waiting','failed','blocked','rejected'].includes(work.state)
+        || work.role === 'implementer' && work.state === 'reviewing' && (!work.head_commit || work.result?.pending_design)
+        || work.state === 'ready' && (['dependencies','resources','retry'].includes(this.developmentState.scheduling?.[intent.id]?.status)
+          || (work.dependencies || []).some(id => this.project.intents.find(d => d.id === id)?.work?.state !== 'verified')));
     },
 
     planParallelWidth() {
