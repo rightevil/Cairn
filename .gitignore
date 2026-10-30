@@ -13,3 +13,6 @@ datas/
 docs
 *.ps1
 AGENTS.md
+/cairn/build/
+/cairn/dist/
+desktop.local.json

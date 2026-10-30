@@ -20,9 +20,7 @@ local:
   workspace_root: .cairn/workspaces
   completed_action: keep
 
-design:
-  bmad_repository: ../BMAD-METHOD
-  grilling_repository: ../skills
+# Design workflows are bundled from designgod; no external Skill repository is needed.
 
 common_env:
   CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1'

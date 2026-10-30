@@ -5,11 +5,18 @@ import json
 from pathlib import Path
 import shutil
 import sys
+import hashlib
+from cairn.runtime_entry import module_command
 
 from cairn.dispatcher.runtime.git_workspace import command, git
 
 BMAD_SKILLS = ("bmad", "bmod-core-tools", "bmod-method", "bmad-product-brief", "bmad-prd",
                "bmad-ux", "bmad-architecture", "bmad-agent-po", "bmad-advanced-elicitation", "bmad-review")
+
+
+def bundled_versions():
+    manifest = json.loads((Path(__file__).parent / 'skills/designgod/references/sources.json').read_text(encoding='utf-8'))
+    return {name: manifest[name]['commit'] for name in ('bmad', 'grilling')}
 
 
 def refresh_orchestration(directory):
@@ -22,9 +29,17 @@ def refresh_orchestration(directory):
 
 def prepare(directory: Path, config):
     if config is None:
-        raise RuntimeError("Set design.bmad_repository and design.grilling_repository in the dispatcher configuration")
-    bmad, grilling = Path(config.bmad_repository).resolve(), Path(config.grilling_repository).resolve()
-    versions = {"bmad": git(bmad, "rev-parse", "HEAD"), "grilling": git(grilling, "rev-parse", "HEAD")}
+        bundle = Path(__file__).parent / 'skills/designgod/references'
+        bmad, grilling = bundle / 'upstream/bmad', bundle / 'upstream/grilling'
+        manifest = json.loads((bundle / 'sources.json').read_text(encoding='utf-8'))
+        for name, digest in manifest['sha256'].items():
+            path = bundle.parent / name
+            if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+                raise RuntimeError('Bundled design Skill integrity check failed: ' + name)
+        versions = {name: manifest[name]['commit'] for name in ('bmad', 'grilling')}
+    else:
+        bmad, grilling = Path(config.bmad_repository).resolve(), Path(config.grilling_repository).resolve()
+        versions = {"bmad": git(bmad, "rev-parse", "HEAD"), "grilling": git(grilling, "rev-parse", "HEAD")}
     marker = directory / "skill-versions.json"
     if marker.exists():
         if json.loads(marker.read_text(encoding="utf-8")) != versions:
@@ -33,11 +48,15 @@ def prepare(directory: Path, config):
         return
     skills = directory / ".claude" / "skills"
     for name in BMAD_SKILLS:
-        source = bmad / "skills" / name
-        if not (source / "SKILL.md").is_file():
+        source = bmad / "skills" / name if config else bmad / name
+        if not (source / ("SKILL.md" if config else 'ENTRY.md')).is_file():
             raise RuntimeError(f"BMAD Skill is missing: {name}")
         shutil.copytree(source, skills / name, dirs_exist_ok=True, ignore=shutil.ignore_patterns("__pycache__", "tests"))
-    shutil.copytree(grilling / "skills" / "productivity" / "grilling", skills / "grilling", dirs_exist_ok=True)
+        if not config:
+            (skills / name / 'ENTRY.md').replace(skills / name / 'SKILL.md')
+    shutil.copytree(grilling / "skills" / "productivity" / "grilling" if config else grilling, skills / "grilling", dirs_exist_ok=True)
+    if not config:
+        (skills / 'grilling/ENTRY.md').replace(skills / 'grilling/SKILL.md')
     refresh_orchestration(directory)
     # Keep upstream text intact; local adaptation is explicit and versioned.
     overlay = ("\n## Cairn host adaptation\nThis web session is interactive even when SDK/Skill-invoked. "
@@ -49,11 +68,8 @@ def prepare(directory: Path, config):
         content = path.read_text(encoding="utf-8")
         end = content.index("---", 3) + 3
         path.write_text(content[:end] + overlay + content[end:], encoding="utf-8")
-    uv = shutil.which("uv")
-    if not uv:
-        raise RuntimeError("BMAD requires uv; install uv before starting design")
     setup = skills / "bmad" / "scripts" / "setup.py"
-    command([uv, "run", "--python", sys.executable, "--no-cache", str(setup),
+    command([*module_command('cairn.dispatcher.bmad_runner'), str(setup),
              "--project-root", str(directory), "--skill", str(skills / "bmad"), "--root", str(skills)], directory)
     artifacts = directory / "artifacts"
     artifacts.mkdir(exist_ok=True)
@@ -95,10 +111,7 @@ def run_script(directory: Path, script: str, args: list[str]):
                     raise ValueError("BMAD script paths must stay in the design workspace")
             elif arg.startswith(flag + "="):
                 raise ValueError("Use separate argv elements for path arguments")
-    uv = shutil.which("uv")
-    if not uv:
-        raise RuntimeError("BMAD requires uv")
-    output = command([uv, "run", "--python", sys.executable, "--no-cache",
+    output = command([*module_command('cairn.dispatcher.bmad_runner'),
                       str(directory / "_bmad" / "scripts" / script), *args], directory).stdout
     if script == "render_skill.py":
         output += ("\nCairn host mapping: retain this workflow's requirements/slicing/readiness reasoning. "

@@ -1,0 +1,2 @@
+# Preserve the bytes recorded in the bundled upstream integrity manifest.
+cairn/src/cairn/dispatcher/skills/designgod/** -text

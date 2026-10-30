@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import re
 import sys
+from cairn.runtime_entry import module_command
 
 
 def allowed_path(value, workspace, directory):
@@ -34,9 +35,10 @@ def prepare(workspace, directory):
     for name in ('tmp', 'artifacts'): (directory/name).mkdir(exist_ok=True)
     config = directory/'workspace-guard.json'
     config.write_text(json.dumps({'workspace':str(workspace),'directory':str(directory)}), encoding='utf-8')
+    argv = module_command('cairn.dispatcher.runtime.workspace_guard')
     settings = directory/'workspace-settings.json'
-    settings.write_text(json.dumps({'hooks': {'PreToolUse': [{'hooks': [{'type':'command','command':sys.executable,
-        'args':['-m','cairn.dispatcher.runtime.workspace_guard'], 'timeout':10,'onFailure':'block'}]}]}}), encoding='utf-8')
+    settings.write_text(json.dumps({'hooks': {'PreToolUse': [{'hooks': [{'type':'command','command':argv[0],
+        'args':argv[1:], 'timeout':10,'onFailure':'block'}]}]}}), encoding='utf-8')
     return {'TMP':str(directory/'tmp'),'TEMP':str(directory/'tmp'),'TMPDIR':str(directory/'tmp'),
         'CAIRN_ARTIFACT_DIR':str(directory/'artifacts'), 'CAIRN_WORKSPACE_GUARD':str(config),
         'CAIRN_WORKSPACE_SETTINGS':str(settings), 'CAIRN_WRITABLE_ROOTS':json.dumps([str(directory/'artifacts'),str(directory/'tmp')])}

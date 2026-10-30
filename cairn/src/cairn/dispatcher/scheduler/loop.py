@@ -4,6 +4,8 @@ import logging
 import os
 import shutil
 import subprocess
+import threading
+import copy
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
@@ -42,9 +44,9 @@ class WorkerSelection:
 
 
 class DispatcherLoop:
-    def __init__(self, config_path: Path):
+    def __init__(self, config_path: Path, config=None):
         self.config_path = config_path
-        self.config = DispatchConfig.load(config_path)
+        self.config = config or DispatchConfig.load(config_path)
         token = os.environ.get("CAIRN_WORKER_TOKEN")
         token_path = Path(self.config.worker_token_file).expanduser() if self.config.worker_token_file else Path.home() / ".local/share/cairn/cairn.worker-token"
         if not token and token_path.is_file():
@@ -71,6 +73,30 @@ class DispatcherLoop:
         self.project_cursor = 0
         self._settings_checked = False
         self._startup_healthchecks_checked = False
+        self.configuration_lock = threading.RLock()
+        self.wake = threading.Event()
+        self.retired_executors = []
+
+    def reload_config(self, config):
+        with self.configuration_lock:
+            if (config.server != self.config.server or config.worker_token_file != self.config.worker_token_file
+                    or config.runtime.execution != self.config.runtime.execution or config.local != self.config.local):
+                raise ValueError('热加载只修改供应商、Agent 和调度参数；运行地址与存储位置保持不变。')
+            # Bound task methods retain the old dispatcher/config until their runs finish.
+            development = copy.copy(self.development) if self.development else None
+            if development:
+                development.config = config
+            for name, capacity in [('executor', config.runtime.max_workers), ('design_executor', config.runtime.max_running_projects)]:
+                old = getattr(self, name)
+                current = self.config.runtime.max_workers if name == 'executor' else self.config.runtime.max_running_projects
+                if capacity != current:
+                    setattr(self, name, ThreadPoolExecutor(max_workers=capacity))
+                    old.shutdown(wait=False)
+                    self.retired_executors.append(old)
+            self.config, self.development = config, development
+            self.worker_unhealthy_until.clear()
+            self.worker_rejected_until.clear()
+            self.wake.set()
 
     def close(self) -> None:
         if self.futures:
@@ -82,25 +108,35 @@ class DispatcherLoop:
         self.executor.shutdown(wait=True)
         self.design_executor.shutdown(wait=True)
         self.cleanup_executor.shutdown(wait=True)
+        for executor in getattr(self, 'retired_executors', []):
+            executor.shutdown(wait=True)
         self.container_manager.close()
         self.client.close()
 
-    def run(self, once: bool = False) -> None:
+    def run(self, once: bool = False, stop_event=None) -> None:
+        from threading import Event
+        stop_event = stop_event or Event()
+        if not hasattr(self, 'configuration_lock'):
+            self.configuration_lock = threading.RLock()
+        if not hasattr(self, 'wake'):
+            self.wake = Event()
         try:
             self.run_startup_healthchecks()
-            while True:
+            while not stop_event.is_set():
                 try:
-                    if not self._settings_checked:
-                        self._validate_server_settings()
-                        self._settings_checked = True
-                    self._reap_futures()
-                    self._reap_cleanup_futures()
-                    summaries = self.client.list_projects()
-                    self._initialize_reason_checkpoints(summaries)
-                    self._refresh_runtime_projects(summaries)
-                    self._cancel_inactive_tasks(summaries)
-                    self._queue_container_cleanups(summaries)
-                    self._dispatch_available(summaries)
+                    with self.configuration_lock:
+                        if not self._settings_checked:
+                            self._validate_server_settings()
+                            self._settings_checked = True
+                        self._reap_futures()
+                        self._reap_cleanup_futures()
+                        summaries = self.client.list_projects()
+                        self._initialize_reason_checkpoints(summaries)
+                        self._refresh_runtime_projects(summaries)
+                        self._cancel_inactive_tasks(summaries)
+                        self._queue_container_cleanups(summaries)
+                        if not stop_event.is_set():
+                            self._dispatch_available(summaries)
                 except requests.RequestException as exc:
                     if once:
                         raise
@@ -109,16 +145,21 @@ class DispatcherLoop:
                         exc,
                         self.config.runtime.interval,
                     )
-                    time.sleep(self.config.runtime.interval)
+                    self.wake.wait(self.config.runtime.interval)
+                    self.wake.clear()
                     continue
                 if once:
                     break
-                time.sleep(self.config.runtime.interval)
+                self.wake.wait(self.config.runtime.interval)
+                self.wake.clear()
         except KeyboardInterrupt:
             for task in self.futures.values():
                 task.cancellation.cancel("Dispatcher shutting down")
             raise
         finally:
+            if stop_event.is_set():
+                for task in list(self.futures.values()):
+                    task.cancellation.cancel("Dispatcher shutting down")
             self.close()
 
     def run_startup_healthchecks_only(self) -> None:
@@ -200,6 +241,7 @@ class DispatcherLoop:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 timeout=15,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
             )
         except (OSError, subprocess.SubprocessError):
             return path, False

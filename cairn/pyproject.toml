@@ -15,10 +15,18 @@ dependencies = [
     "requests>=2.32.3",
     "claude-agent-sdk==0.2.174",
     "pywinpty>=3.1.1 ; sys_platform == 'win32'",
+    "jinja2>=3.1",
 ]
 
 [project.scripts]
 cairn = "cairn.cli:main"
+
+[project.optional-dependencies]
+desktop = [
+    "pillow>=13.0.0",
+    "pystray>=0.19.5",
+    "pywebview>=6.2.1",
+]
 
 [build-system]
 requires = ["uv_build>=0.8.9,<0.9.0"]
@@ -26,8 +34,12 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+    "commitizen==4.19.2",
     "httpx>=0.27",
     "pytest>=8.3",
+]
+packaging = [
+    "pyinstaller>=6.22.3",
 ]
 
 [tool.pytest.ini_options]

@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 from cairn.server.development_models import Role
 
 
@@ -185,10 +185,30 @@ class RuntimeConfig(BaseModel):
     prompt_group: str = Field(min_length=1)
 
 
+class ProviderConfig(BaseModel):
+    id: str = Field(min_length=1)
+    name: str = Field(min_length=1)
+    protocol: Literal['anthropic', 'openai']
+    base_url: str
+    api_key: str = ''
+    models: list[str] = Field(default_factory=list)
+
+    @field_validator('base_url')
+    @classmethod
+    def validate_url(cls, value):
+        from urllib.parse import urlsplit
+        endpoint = urlsplit(value)
+        if endpoint.scheme not in ('http', 'https') or not endpoint.hostname or endpoint.username or endpoint.password or endpoint.query or endpoint.fragment:
+            raise ValueError('Provider URL must be an HTTP(S) endpoint without credentials or query parameters')
+        endpoint.port
+        return value.rstrip('/')
+
+
 class WorkerConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str
+    provider: str | None = None
     type: WorkerType
     task_types: list[TaskType] = Field(default_factory=list)
     roles: list[Role] = Field(default_factory=list)
@@ -208,7 +228,8 @@ class WorkerConfig(BaseModel):
         return value
 
     @model_validator(mode="after")
-    def validate_env(self) -> "WorkerConfig":
+    def validate_env(self, info: ValidationInfo) -> "WorkerConfig":
+        environment = (info.context or {}).get('environment', os.environ)
         if not self.task_types and not self.roles:
             raise ValueError("task_types or roles must not be empty")
         if set(self.roles) & {"planner", "architect"} and self.tier != "strong":
@@ -216,12 +237,12 @@ class WorkerConfig(BaseModel):
         if self.command is not None and (not self.command or not all(self.command)):
             raise ValueError("command must be a nonempty argv prefix")
         for target, source in self.env_from.items():
-            if source not in os.environ:
+            if source not in environment:
                 raise ValueError(
                     f"worker {self.name}: env_from.{target} must name an existing environment variable; "
                     f"put literal URLs, credentials or model IDs in env.{target}, not env_from"
                 )
-            self.env[target] = os.environ[source]
+            self.env[target] = environment[source]
         if self.model:
             key = {"claudecode": "ANTHROPIC_MODEL", "codex": "CODEX_MODEL", "pi": "PI_MODEL"}.get(self.type)
             if key:
@@ -247,6 +268,7 @@ class DispatchConfig(BaseModel):
     design: DesignConfig | None = None
     common_env: dict[str, str] = Field(default_factory=dict)
     workers: list[WorkerConfig]
+    providers: list[ProviderConfig] = Field(default_factory=list)
     worker_token_file: str | None = None
 
     @model_validator(mode="before")
@@ -262,6 +284,12 @@ class DispatchConfig(BaseModel):
             return data
 
         merged = dict(data)
+        providers = {}
+        for value in data.get('providers', []):
+            provider = ProviderConfig.model_validate(value)
+            if provider.id in providers:
+                raise ValueError('Provider IDs must be unique')
+            providers[provider.id] = provider
         merged_workers: list[Any] = []
         for worker in workers:
             if not isinstance(worker, dict):
@@ -275,6 +303,21 @@ class DispatchConfig(BaseModel):
                 continue
             worker_copy = dict(worker)
             worker_copy["env"] = {**common_env, **worker_env}
+            if provider_id := worker.get('provider'):
+                if provider_id not in providers:
+                    raise ValueError('Worker references a missing provider')
+                provider = providers[provider_id]
+                kind = worker.get('type')
+                if kind == 'claudecode' and provider.protocol != 'anthropic' or kind == 'codex' and provider.protocol != 'openai':
+                    raise ValueError('Worker CLI is incompatible with the provider protocol')
+                prefix = {'claudecode': ('ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN'),
+                          'codex': ('CODEX_BASE_URL', 'OPENAI_API_KEY'), 'pi': ('PI_BASE_URL', 'PI_API_KEY')}.get(kind)
+                if not prefix:
+                    raise ValueError('Provider requires a supported Agent CLI')
+                worker_copy['env'].update({prefix[0]: provider.base_url, prefix[1]: provider.api_key})
+                worker_copy['env_from'] = {k: v for k, v in worker.get('env_from', {}).items() if k not in prefix}
+                if kind == 'pi':
+                    worker_copy['env']['PI_PROVIDER_API'] = 'anthropic-messages' if provider.protocol == 'anthropic' else 'openai-completions'
             merged_workers.append(worker_copy)
         merged["workers"] = merged_workers
         return merged
@@ -309,12 +352,12 @@ class DispatchConfig(BaseModel):
         return self
 
     @classmethod
-    def load(cls, path: Path) -> "DispatchConfig":
+    def load(cls, path: Path, *, environment=None) -> "DispatchConfig":
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         for name in ('max_implementers','max_reviewers'):
             value = os.environ.get('CAIRN_' + name.upper())
             if value: data.setdefault('runtime', {})[name] = value
-        config = cls.model_validate(data)
+        config = cls.model_validate(data, context={'environment': environment} if environment is not None else None)
         if config.local and config.local.workspace_root:
             root = Path(config.local.workspace_root).expanduser()
             config.local.workspace_root = str((root if root.is_absolute() else path.resolve().parent / root).resolve())

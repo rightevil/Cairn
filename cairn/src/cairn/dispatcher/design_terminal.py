@@ -6,10 +6,10 @@ import logging
 import os
 from pathlib import Path
 import queue
-import sys
 import threading
 import time
 import uuid
+from cairn.runtime_entry import module_command
 
 from cairn.dispatcher.development import atomic_json, executable_argv
 from cairn.dispatcher.runtime.pty_process import ConsoleProcess
@@ -25,13 +25,14 @@ async def run_console(dispatcher, project, worker, run, directory, snapshot, can
         'review':review,'session':session,'readable':[str(p) for p in readable],'message_id':message_id,
         'prompt_hash':hashlib.sha256(prompt.encode()).hexdigest() if prompt else None}
     atomic_json(directory/'terminal-private.json',private)
-    hook = {'type':'command','command':sys.executable,'args':['-m','cairn.dispatcher.terminal_bridge','hook'],
+    hook_argv = module_command('cairn.dispatcher.terminal_bridge', 'hook')
+    hook = {'type':'command','command':hook_argv[0],'args':hook_argv[1:],
             'timeout':15,'onFailure':'block'}
     settings = {'theme':'light','skipDangerousModePermissionPrompt':True,
         'hooks':{name:[{'hooks':[hook]}] for name in ('PreToolUse','UserPromptSubmit','Stop','StopFailure','SessionEnd')}}
     atomic_json(directory/'terminal-settings.json',settings)
-    servers = {'cairn':{'command':sys.executable,
-        'args':['-m','cairn.dispatcher.terminal_bridge','serve']}}
+    server_argv = module_command('cairn.dispatcher.terminal_bridge', 'serve')
+    servers = {'cairn':{'command':server_argv[0], 'args':server_argv[1:]}}
     atomic_json(directory/'terminal-mcp.json',{'mcpServers':servers})
     argv = executable_argv(worker,['claude'])
     if len(argv)%2 != 1 or any(a not in ('--model','--fallback-model','--effort') for a in argv[1::2]):

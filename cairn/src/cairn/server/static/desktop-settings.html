@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Cairn · 设置</title>
+<link rel="icon" href="favicon.svg"><link rel="stylesheet" href="tokens.css"><link rel="stylesheet" href="base.css"><link rel="stylesheet" href="desktop-settings.css">
+<script defer src="desktop-settings.js"></script><script defer src="vendor/alpine.min.js"></script></head>
+<body x-data="desktopSettings()">
+<header class="settings-header"><img src="favicon.svg" width="42" height="42" alt=""><div><h1>Cairn 设置</h1><p>配置本地工作台与 Agent 运行环境</p></div><span class="settings-tag">桌面版</span></header>
+<div class="settings-error" x-show="error" x-text="error" role="alert" x-cloak></div>
+<p class="settings-loading" x-show="!form && !error">正在读取本地配置…</p>
+<template x-if="form"><form novalidate @submit.prevent="save()" @input="saved = false" @change="saved = false">
+<div class="settings-layout"><nav aria-label="设置分类"><template x-for="item in sections" :key="item.id"><button type="button" :class="{active:section === item.id}" :aria-current="section === item.id ? 'page' : null" @click="section = item.id" x-text="item.label"></button></template><p>配置保存在本机。<br>保存后立即生效。</p></nav>
+<main>
+<section x-show="section === 'providers'"><div class="section-heading"><h2>供应商</h2><p>集中管理模型服务的连接、密钥与模型列表。多个 Agent 可以共用一个供应商。</p></div>
+<template x-for="(provider,index) in form.providers" :key="provider.id"><article class="worker-settings"><header><h3 x-text="provider.name || '新供应商'"></h3><button type="button" class="quiet" @click="removeProvider(index)">移除</button></header>
+<div class="field-grid"><div><label :for="'provider-name-'+index">供应商名称</label><input :id="'provider-name-'+index" x-model="provider.name" placeholder="例如 Magpie、本地网关"></div><div><label :for="'protocol-'+index">接口协议</label><select :id="'protocol-'+index" x-model="provider.protocol"><option value="anthropic">Anthropic / Claude 兼容</option><option value="openai">OpenAI 兼容</option></select></div></div>
+<label :for="'url-'+index">服务地址</label><input :id="'url-'+index" x-model="provider.base_url" placeholder="https://api.example.com 或本地网关地址">
+<label :for="'key-'+index">API key</label><input :id="'key-'+index" type="password" x-model="provider.api_key" :placeholder="provider.has_key ? '已配置，留空保持原值' : '服务无需密钥时可留空'" autocomplete="new-password"><label class="clear-secret" x-show="provider.has_key"><input type="checkbox" x-model="provider.clear_key">清空已保存的密钥</label>
+<label :for="'models-'+index">可用模型</label><textarea :id="'models-'+index" x-model="provider.models_text" rows="3" placeholder="每行一个模型 ID，例如 claude-sonnet 或网关中的模型别名"></textarea><p class="field-note">在 Agent 页为每个角色选择供应商和模型。此处不请求模型服务。</p>
+</article></template><button type="button" class="secondary" @click="addProvider()">+ 添加供应商</button><div class="settings-notice">也可以不添加供应商，让 Agent 使用本机 CLI 已有的登录与模型设置。密钥不会回显；保存后新任务立即使用更新配置。</div></section>
+<section x-show="section === 'agents'"><div class="section-heading"><h2>Agent 与模型</h2><p>为 Agent 指定供应商、模型和职责。正在运行的任务保持原配置，新任务使用更新后的配置。</p></div>
+<template x-for="(worker,index) in form.workers" :key="index"><article class="worker-settings"><header><h3 x-text="worker.name || '新 Agent'"></h3><button type="button" class="quiet" @click="form.workers.splice(index,1); saved=false" :disabled="form.workers.length === 1">移除</button></header>
+<div class="field-grid"><div><label :for="'name-'+index">名称</label><input :id="'name-'+index" x-model="worker.name" required></div><div><label :for="'type-'+index">CLI 类型</label><select :id="'type-'+index" x-model="worker.type"><option value="claudecode">Claude Code</option><option value="codex">Codex</option><option value="pi">Pi</option><option value="mock" x-show="worker.type === 'mock'">Mock（已有测试配置）</option></select></div></div>
+<label :for="'command-'+index">命令与固定参数</label><textarea :id="'command-'+index" x-model="worker.command" rows="2" placeholder="可执行文件路径或 PATH 命令；每行一个参数"></textarea><p class="field-note">例如第一行 claude，后续每行一个固定参数。路径带空格时也无需引号。</p>
+<label :for="'supplier-'+index">供应商</label><select :id="'supplier-'+index" x-model="worker.provider"><option value="">沿用本机 CLI 登录</option><template x-for="provider in form.providers" :key="provider.id"><option :value="provider.id" x-text="provider.name"></option></template></select><p class="field-note">Claude Code 使用 Anthropic 兼容接口；Codex 使用 OpenAI 兼容接口。</p>
+<div class="field-grid"><div><label :for="'tier-'+index">模型档位</label><select :id="'tier-'+index" x-model="worker.tier"><option value="strong">强模型</option><option value="standard">普通模型</option></select></div><div><label :for="'model-'+index">模型名称（可选）</label><input :id="'model-'+index" x-model="worker.model" :list="'model-list-'+index" placeholder="选择或输入模型 ID"><datalist :id="'model-list-'+index"><template x-for="model in providerModels(worker.provider)" :key="model"><option :value="model"></option></template></datalist></div></div>
+<fieldset><legend>承担角色</legend><div class="role-options"><template x-for="role in roles" :key="role.id"><label><input type="checkbox" :value="role.id" x-model="worker.roles"><span x-text="role.label"></span></label></template></div></fieldset>
+<div class="field-grid"><div><label :for="'slots-'+index">运行名额</label><input :id="'slots-'+index" type="number" min="1" x-model.number="worker.max_running" required></div><div><label :for="'priority-'+index">优先级（越小越优先）</label><input :id="'priority-'+index" type="number" min="0" x-model.number="worker.priority" required></div></div>
+</article></template><button type="button" class="secondary" @click="addWorker()">+ 添加 Agent</button><p class="field-note">开发配置需要覆盖规划、设计决策、实施与独立审查四种角色；规划与设计决策需要强模型。</p>
+</section>
+<section x-show="section === 'scheduling'"><div class="section-heading"><h2>并发与超时</h2><p>限制整体并发和角色容量，避免任务占满本机资源。</p></div><div class="field-grid"><template x-for="field in runtimeFields" :key="field.key"><div><label :for="field.key" x-text="field.label"></label><input :id="field.key" type="number" min="1" x-model.number="form.runtime[field.key]" :required="!field.optional" :placeholder="field.optional ? '沿用总运行名额' : ''"></div></template></div>
+<label for="timeout">单次开发任务超时（秒）</label><input id="timeout" type="number" min="1" x-model.number="form.tasks.development_timeout" required></section>
+<section x-show="section === 'skills'"><div class="section-heading"><h2>内置设计 Skill</h2><p>designgod 的 BMAD / grilling 工作流随 Cairn 打包，无需选择仓库、安装全局 Skill 或配置 Python 路径。</p></div><div class="settings-notice"><strong>完整的设计过程</strong><p>目标与范围 → 需求梳理 → 体验设计 → 架构设计 → 实施计划。保留快速 / 教练路径、决策访谈、阶段确认和独立评审。</p></div><label>BMAD 来源版本</label><code x-text="form.skills.bmad"></code><label>grilling 来源版本</label><code x-text="form.skills.grilling"></code><p class="field-note">上游原文、模板和脚本保留来源及校验清单。Cairn 使用原生草案与批准链承接产出；资源一致不代表模型每次执行都完全相同。</p></section>
+</main></div>
+<footer class="settings-footer"><div><p x-show="message" x-text="message" role="status"></p><span x-show="!message">校验并备份原配置，保存后热加载。</span></div><button type="button" class="quiet" @click="load()" :disabled="busy">重新载入</button><button class="primary" type="submit" :disabled="busy" x-text="busy ? '正在应用…' : '保存并应用'"></button></footer>
+</form></template>
+
+</body></html>

@@ -3,6 +3,7 @@ let workspaceGraphObserver = null;
 
 function cairnApp() {
   return {
+    desktopAvailable: false,
     ...developmentFeatures(), ...designFeatures(),
     view: 'list', sideTab: 'design', projects: [], project: null, selectedProjectId: '',
     loadingProject: false, loadingList: true, connectionError: '', polling: false,
@@ -18,6 +19,8 @@ function cairnApp() {
     fileSuggestions: [], fileIndex: 0, fileTimer: null,
 
     async init() {
+      this.desktopAvailable = !!window.pywebview?.api?.open_settings;
+      window.addEventListener('pywebviewready', () => { this.desktopAvailable = !!window.pywebview?.api?.open_settings; });
       const returnFocus = new Map();
       for (const field of ['showNewProject', 'developmentArtifact.open', 'folderOpen', 'deleteTarget', 'controlOpen']) this.$watch(field, open => {
         if (open) {
@@ -44,6 +47,10 @@ function cairnApp() {
       }, 5000);
     },
 
+    async openDesktopSettings() {
+      try { await window.pywebview.api.open_settings(); }
+      catch { this.showToast('无法打开运行设置，请重新启动桌面版。', 'error'); }
+    },
     trapDialog(event) {
       const controls = [...event.currentTarget.querySelectorAll('button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled), a[href]')]
         .filter(e => e.getBoundingClientRect().height);

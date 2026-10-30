@@ -2,14 +2,15 @@
 import json
 import os
 from pathlib import Path
-import sys
+from cairn.runtime_entry import module_command
 import uuid
 
 import requests
 
 
 def configure_tools(argv, worker_type, directory: Path):
-    server = {"command": sys.executable, "args": ["-m", "cairn.dispatcher.collaboration_tools"]}
+    argv_runtime = module_command("cairn.dispatcher.collaboration_tools")
+    server = {"command": argv_runtime[0], "args": argv_runtime[1:]}
     if worker_type == "claudecode":
         path = directory / "collaboration-mcp.json"
         path.write_text(json.dumps({"mcpServers": {"cairn_collaboration": server}}), encoding="utf-8")

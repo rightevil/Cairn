@@ -1,3 +1,44 @@
+> [!IMPORTANT]
+> **本 fork 已停止二次开发（2026-10-30）。**
+>
+> 后续工作转向 [Devloom](https://github.com/rightevil/devloom)，围绕“设计优先的自治软件工程平台”重新设计与开发。
+> 本仓库保留 Cairn 二开阶段的代码、历史记录和探索成果，作为后续设计的参考；下方功能介绍与使用说明保留为历史资料。
+> Devloom 当前处于概念与设计阶段，尚未提供可运行的软件，进展请以新仓库为准。
+>
+> Development of this fork has ended. Further work continues in [Devloom](https://github.com/rightevil/devloom),
+> a new project being redesigned from the ground up. This repository remains available as a historical reference.
+
+## Windows 免安装桌面版
+
+从 [Releases](https://github.com/rightevil/Cairn/releases) 下载 `Cairn-<版本>-windows-x64.zip`，解压完整目录后双击 `Cairn.exe`。
+请保留同目录的 `_internal` 和 `cairn-runtime.exe`；无需安装 Python。需要 Microsoft Edge WebView2 Runtime、本机 Git 和所选 Agent CLI。
+程序未做代码签名，Windows 可能提示未知发布者。
+
+首次启动在设置页添加供应商（协议、地址、密钥、模型），再为 Agent 选择供应商、模型与角色。
+工作台“运行设置”保存后热加载：当前任务继续使用原配置，新任务采用新配置。designgod / BMAD / grilling 已内置。
+关闭窗口后继续在托盘运行；单击托盘图标恢复，右键可打开或退出 Cairn。
+
+升级前退出 Cairn，保留 `dispatch.yaml`、`desktop.local.json` 和 `.cairn` 中的配置及数据，再替换程序文件。
+本地配置可能包含密钥，请勿分享。发布包只收集程序与公共示例，附带 `.sha256` 校验文件。
+
+### 构建与版本发布
+
+在仓库根目录运行：
+
+```sh
+uv sync --locked --project cairn --extra desktop --group packaging
+uv run --locked --project cairn python cairn/packaging/build.py
+uv run --locked --project cairn python cairn/packaging/verify.py
+```
+
+构建需要 Windows x64，产物位于 `cairn/dist/`。GitHub Actions 在主分支、PR 和手动触发时测试并构建便携包；
+推送与包版本一致的 `v*` 标签后，通过全部检查才创建 GitHub Release 并上传 ZIP 与校验文件。
+
+版本由 [Commitizen](https://commitizen-tools.github.io/commitizen/commands/bump/) 统一管理：
+在工作区干净、功能改动已提交后，运行 `uv run --locked --project cairn cz bump --check-consistency`，
+即可按 Conventional Commits 更新 `.cz.toml`、包版本、锁文件和 `CHANGELOG.md`，并创建版本提交与标签。
+确需指定级别时使用 `--increment MINOR` 或 `--increment PATCH`。发布时需将对应主分支提交及该版本标签同步到 GitHub。
+
 <div align="center">
 
 <img src="./README/banner.png" alt="Cairn Banner"/>
@@ -30,12 +71,12 @@ Cairn is a general-purpose problem-solving engine. <br/>It defines no roles, no 
 
 </div>
 
-## This fork: unattended software development
+## This fork: development history
 
-新增方案设计阶段：网页直接对话，由 Claude Code 自动编排
+二开阶段新增了方案设计能力：网页直接对话，由 Claude Code 自动编排
 BMAD 主仓库与 Grilling；设计草案经独立评审和用户确认后，直接成为 Cairn 原生任务。
 
-本 fork 增加了面向软件开发的无人值守闭环：Magpie 按角色提供强／普通模型，
+本 fork 曾探索面向软件开发的无人值守闭环：Magpie 按角色提供强／普通模型，
 复用 Claude Code、Codex 和已有 Pi；功能分支独立开发，经过独立审查、串行 PR
 合并与集成验证。原有网页图谱新增开发面板、建议／指令、运行日志和证据入口。
 

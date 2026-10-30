@@ -1,7 +1,14 @@
 [tool.commitizen]
 name = "cz_conventional_commits"
-tag_format = "$version"
+tag_format = "v$version"
 version_scheme = "semver2"
-version = "0.0.1"
+version = "0.2.1"
 update_changelog_on_bump = true
 major_version_zero = true
+version_files = [
+    "cairn/pyproject.toml:version",
+    "cairn/src/cairn/__init__.py:__version__",
+]
+pre_bump_hooks = ["uv lock --project cairn", "git add cairn/uv.lock"]
+bump_message = "chore(release): bump version $current_version → $new_version"
+annotated_tag = true

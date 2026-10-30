@@ -19,7 +19,7 @@
 </svg>
 <div class="shell" :inert="showNewProject || developmentArtifact.open || !!deleteTarget || controlOpen">
 <aside class="rail" aria-label="项目导航">
-  <div class="brand"><span class="brand-mark">c</span><span>CAIRN</span></div>
+  <div class="brand"><img src="/static/favicon.svg" width="28" height="28" alt=""><span>CAIRN</span></div>
   <a href="#" class="nav-item" :class="{active: view === 'list'}" :aria-current="view === 'list' ? 'page' : null" title="项目列表"><svg class="icon" aria-hidden="true"><use href="#icon-grid"/></svg><span>项目列表</span></a>
   <div class="nav-label">我的项目</div>
   <nav class="project-nav" aria-label="具体项目"><template x-for="p in projects" :key="p.id"><div>
@@ -30,7 +30,7 @@
       <button class="session-item stage-entry" @click="setStage('development')" :class="{active:sideTab === 'development'}"><svg class="icon" aria-hidden="true"><use href="#icon-grid"/></svg><span>开发黑板</span></button>
     </div>
   </div></template><p x-show="!projects.length && !loadingList" class="muted nav-label">暂无项目</p></nav>
-  <div class="rail-footer"><button class="nav-item" @click="showNewProject = true; createError = ''" title="创建项目"><svg class="icon" aria-hidden="true"><use href="#icon-plus"/></svg><span>创建项目</span></button><p class="local-status"><i class="live-indicator" x-show="!connectionError" aria-hidden="true"></i><span x-text="connectionError ? '连接待恢复' : '本地工作台'"></span></p><a class="credits-link" href="/static/credits.html" target="_blank" rel="noopener">背景署名</a></div>
+  <div class="rail-footer"><button class="nav-item" @click="showNewProject = true; createError = ''" title="创建项目"><svg class="icon" aria-hidden="true"><use href="#icon-plus"/></svg><span>创建项目</span></button><button class="nav-item" x-show="desktopAvailable" x-cloak @click="openDesktopSettings()" title="运行设置"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16M8 3v6M16 9v6M9 15v6"/></svg><span>运行设置</span></button><p class="local-status"><i class="live-indicator" x-show="!connectionError" aria-hidden="true"></i><span x-text="connectionError ? '连接待恢复' : '本地工作台'"></span></p><a class="credits-link" href="/static/credits.html" target="_blank" rel="noopener">背景署名</a></div>
 </aside>
 <main class="page">
   <div class="error-banner" x-show="connectionError" x-cloak role="alert" x-text="connectionError"></div>
